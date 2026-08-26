@@ -106,7 +106,7 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate
 # Linux/macOS: source .venv/bin/activate
 pip install -r requirements-dev.txt
-pytest -q
+python -m pytest -q
 ```
 
 ### 前端

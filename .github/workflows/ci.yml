@@ -25,26 +25,7 @@ jobs:
       - run: npm run build
         working-directory: frontend
       - run: pip install -r requirements-dev.txt
-      - name: Run backend tests
-        shell: bash
-        run: |
-          set +e
-          pytest -q 2>&1 | tee pytest-output.txt
-          test_status=${PIPESTATUS[0]}
-          {
-            echo '### Backend test output'
-            echo '```text'
-            cat pytest-output.txt
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ "$test_status" -ne 0 ]; then
-            diagnostic=$(tail -c 6000 pytest-output.txt)
-            diagnostic=${diagnostic//'%'/'%25'}
-            diagnostic=${diagnostic//$'\r'/'%0D'}
-            diagnostic=${diagnostic//$'\n'/'%0A'}
-            echo "::error file=tests,title=pytest diagnostic::$diagnostic"
-          fi
-          exit "$test_status"
+      - run: python -m pytest -q
 
   frontend:
     runs-on: ubuntu-latest
