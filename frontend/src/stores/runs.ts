@@ -1,0 +1,2 @@
+import {defineStore} from 'pinia';import{api}from'../api';import type{RefreshRun}from'../types'
+export const useRunsStore=defineStore('runs',{state:()=>({items:[]as RefreshRun[],total:0,loading:false}),actions:{async load(params:Record<string,any>={}){this.loading=true;try{const q=new URLSearchParams(Object.entries(params).filter(([,v])=>v!==''&&v!=null).map(([k,v])=>[k,String(v)]));const r:any=await api(`/api/runs?${q}`);this.items=r.items;this.total=r.total}finally{this.loading=false}}}})

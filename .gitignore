@@ -1,0 +1,56 @@
+# Runtime data and secrets
+/data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.key
+*.pem
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.coverage
+htmlcov/
+
+# Frontend
+node_modules/
+frontend/node_modules/
+.pnpm-store/
+dist/
+frontend/dist/
+frontend/*.tsbuildinfo
+app/static/
+
+# Local tests, previews, references and handoff files
+.test-*/
+.test-tmp*/
+preview-v3.2/
+references/
+CODEX_START_HERE.md
+PROJECT_TREE.txt
+SHA256SUMS.txt
+
+# Release artifacts and local patches
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.patch
+*.sha256
+
+# IDE and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

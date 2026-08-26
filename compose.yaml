@@ -1,0 +1,13 @@
+services:
+  sub-manager:
+    build:
+      context: .
+    image: sub-manager:v3.3.0
+    container_name: sub-manager
+    restart: unless-stopped
+    ports:
+      - "7777:7777"
+    environment:
+      TZ: Asia/Shanghai
+    volumes:
+      - ./data:/data

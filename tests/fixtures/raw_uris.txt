@@ -1,0 +1,5 @@
+vless://44444444-4444-4444-8444-444444444444@vless.example.invalid:443?security=tls&type=ws#VLESS%20Node
+trojan://password-placeholder@trojan.example.invalid:443?security=tls#Trojan%20Node
+hysteria2://password-placeholder@hy2.example.invalid:443?sni=hy2.example.invalid#Hysteria2%20Node
+tuic://55555555-5555-4555-8555-555555555555:password-placeholder@tuic.example.invalid:443#TUIC%20Node
+anytls://password-placeholder@anytls.example.invalid:443?peer=anytls.example.invalid#AnyTLS%20Node
