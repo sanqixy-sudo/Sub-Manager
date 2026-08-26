@@ -7,6 +7,8 @@ import app.services.cache as cachemod
 from app.main import app
 from app.services.fetcher import fetcher
 from app.services.parser import NormalizedNode, ParseResult
+from app.schemas import SubscriptionIn
+from app.repository import create_subscription
 
 
 def configure_database(tmp_path, monkeypatch) -> None:
@@ -180,3 +182,21 @@ def test_brand_assets_are_served_from_allowlist() -> None:
             response = client.get(f"/{name}")
             assert response.status_code == 200 and response.content
         assert client.get("/not-a-public-static-file.txt").status_code == 404
+
+
+def test_upstream_can_disable_group_rename_without_migration(tmp_path, monkeypatch) -> None:
+    configure_database(tmp_path, monkeypatch)
+    dbmod.init_db()
+    payload = SubscriptionIn.model_validate({
+        "name": "Per upstream policy",
+        "rename_mode": "smart",
+        "rename_ignore": "EDGE",
+        "rename_template": "{flag}|{name}",
+        "upstreams": [{
+            "name": "Raw source", "url": "https://provider.invalid/sub",
+            "rename_policy": "disabled",
+        }],
+        "outputs": [{"client_type": "mihomo", "name": "Main", "slug": "mihomo"}],
+    })
+    group = create_subscription(payload)
+    assert group["upstreams"][0]["rename_policy"] == "disabled"

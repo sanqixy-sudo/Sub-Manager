@@ -16,7 +16,7 @@ class UpstreamIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     url: HttpUrl
     enabled: bool = True
-    rename_policy: str = Field(default="inherit", pattern=r"^(inherit|smart|passthrough)$")
+    rename_policy: str = Field(default="inherit", pattern=r"^(inherit|smart|passthrough|disabled)$")
     rename_ignore: str = Field(default="", max_length=1000)
     rename_template: str = Field(default=DEFAULT_RENAME_TEMPLATE, min_length=1, max_length=300)
 

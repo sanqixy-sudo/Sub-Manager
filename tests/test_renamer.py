@@ -29,3 +29,27 @@ def test_passthrough_and_custom_template_are_applied_to_downstream_model() -> No
     rename_nodes([smart], "smart", "EDGE", "{flag} {name} · {source}")
     assert smart.name == "🇯🇵 Tokyo · Provider"
     assert smart.proxy["name"] == smart.name
+
+
+def test_remote_passthrough_can_override_smart_group_rule() -> None:
+    original = "UNSTRUCTURED Provider Name"
+    node = NormalizedNode(original, "remote", "Special Provider", source_id=42,
+                          proxy={"name": original, "type": "ss"})
+    rename_nodes([node], "smart", "EDGE", "{flag}|{name}", [{
+        "id": 42, "rename_policy": "disabled", "rename_ignore": "", "rename_template": DEFAULT_TEMPLATE,
+    }])
+    assert node.name == original
+    assert node.rule_name == original
+
+
+def test_manual_node_never_inherits_group_smart_rule_but_alias_can_override() -> None:
+    original = "DMIT-US-04-HK-BoilHKT-Home|📊500.00GB|⌛25D"
+    node = NormalizedNode(original, "manual", "手动节点", proxy={"name": original, "type": "ss"})
+    rename_nodes([node], "smart", "DMIT-US", DEFAULT_TEMPLATE)
+    assert node.name == original
+    assert node.rule_name == original
+    assert node.traffic == "500GB" and node.reset == "25D"
+
+    from app.services.renamer import apply_alias
+    apply_alias(node, "香港手动家宽")
+    assert node.name == "香港手动家宽|500GB|25D"

@@ -135,8 +135,16 @@ def rename_nodes(nodes: list[NormalizedNode], mode: str, ignored: str, template:
     by_id = {int(item["id"]): item for item in (upstreams or []) if item.get("id") is not None}
     for node in nodes:
         selected_mode, selected_ignore, selected_template = mode, ignored, template
+        # Manual nodes deliberately never inherit the group-level smart rule. Their
+        # imported name remains stable until the administrator sets a node alias.
+        if node.source_id is None and node.source_name == "手动节点":
+            selected_mode = "passthrough"
+            selected_ignore = ""
+            selected_template = DEFAULT_TEMPLATE
         upstream = by_id.get(node.source_id or -1)
         policy = str(upstream.get("rename_policy", "inherit")) if upstream else "inherit"
+        if policy == "disabled":
+            policy = "passthrough"
         if policy != "inherit":
             selected_mode = policy
             selected_ignore = str(upstream.get("rename_ignore", ""))
