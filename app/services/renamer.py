@@ -149,6 +149,7 @@ def rename_nodes(nodes: list[NormalizedNode], mode: str, ignored: str, template:
             selected_mode = policy
             selected_ignore = str(upstream.get("rename_ignore", ""))
             selected_template = str(upstream.get("rename_template") or DEFAULT_TEMPLATE)
+        node.rename_managed = selected_mode == "smart"
         parts = parse_name(node.original_name, node.source_name, selected_ignore)
         node.traffic, node.reset = parts.traffic, parts.reset
         if selected_mode == "smart":

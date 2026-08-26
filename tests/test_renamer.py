@@ -53,3 +53,13 @@ def test_manual_node_never_inherits_group_smart_rule_but_alias_can_override() ->
     from app.services.renamer import apply_alias
     apply_alias(node, "香港手动家宽")
     assert node.name == "香港手动家宽|500GB|25D"
+
+
+def test_only_smart_rename_marks_node_as_confirmation_managed() -> None:
+    smart = NormalizedNode("EDGE-01-US-Home", "smart", "Provider")
+    rename_nodes([smart], "smart", "EDGE", DEFAULT_TEMPLATE)
+    assert smart.rename_managed is True
+
+    passthrough = NormalizedNode("Unstructured name", "raw", "Provider")
+    rename_nodes([passthrough], "passthrough", "", DEFAULT_TEMPLATE)
+    assert passthrough.rename_managed is False

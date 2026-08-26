@@ -185,3 +185,42 @@ def test_operations_apis_and_inspector_never_return_connection_secrets(tmp_path,
         assert inspected.json()["nodes"][0]["protocol"] == "vless"
         assert client.get("/api/overview").status_code == 200
         assert client.get("/api/runs").status_code == 200
+
+
+def test_nodes_outside_smart_rename_never_require_confirmation(tmp_path, monkeypatch) -> None:
+    configure_database(tmp_path, monkeypatch); dbmod.init_db()
+    group = create_subscription(SubscriptionIn.model_validate({
+        "name": "Confirmation scope", "interval_minutes": 30, "enabled": True,
+        "rename_mode": "smart", "rename_ignore": "EDGE", "rename_template": DEFAULT_TEMPLATE,
+        "upstreams": [{"name": "Raw", "url": "https://provider.invalid/sub", "enabled": True,
+                       "rename_policy": "disabled"}],
+        "outputs": [{"client_type": "mihomo", "name": "Main", "slug": "mihomo",
+                     "update_interval_minutes": 60, "enabled": True}],
+    }))
+    upstream_id = group["upstreams"][0]["id"]
+
+    managed = NormalizedNode("EDGE-01-US-Home", "same", "Raw", source_id=upstream_id)
+    rename_nodes([managed], "smart", "EDGE", DEFAULT_TEMPLATE, [{
+        "id": upstream_id, "rename_policy": "smart", "rename_ignore": "EDGE",
+        "rename_template": DEFAULT_TEMPLATE,
+    }])
+    preferences = prepare_node_state(group["id"], [managed])
+    store_node_snapshot(group["id"], [managed], preferences)
+
+    raw = NormalizedNode("Completely changed raw name", "same", "Raw", source_id=upstream_id)
+    rename_nodes([raw], "smart", "EDGE", DEFAULT_TEMPLATE, [{
+        "id": upstream_id, "rename_policy": "disabled",
+    }])
+    raw_preferences = prepare_node_state(group["id"], [raw])
+    assert raw.confirmation_status == "confirmed"
+    assert raw.name == "Completely changed raw name"
+    assert not raw.name.startswith("⚠️")
+    assert raw_preferences[0]["status"] == "confirmed"
+    store_node_snapshot(group["id"], [raw], raw_preferences)
+
+    manual = NormalizedNode("My manual node", "manual-new", "手动节点")
+    rename_nodes([manual], "smart", "EDGE", DEFAULT_TEMPLATE)
+    manual_preferences = prepare_node_state(group["id"], [manual])
+    assert manual.confirmation_status == "confirmed"
+    assert manual.name == "My manual node"
+    assert manual_preferences[0]["status"] == "confirmed"

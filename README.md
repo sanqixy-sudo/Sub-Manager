@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v3.3.1-2563eb?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-v3.3.2-2563eb?style=flat-square">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single--container-2496ed?style=flat-square&logo=docker&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white">
   <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&logo=vuedotjs&logoColor=white">
@@ -70,7 +70,7 @@ docker compose up -d --build
 ### Docker CLI
 
 ```bash
-docker build -t sub-manager:v3.3.1 .
+docker build -t sub-manager:v3.3.2 .
 
 docker run -d \
   --name sub-manager \
@@ -78,7 +78,7 @@ docker run -d \
   -p 7777:7777 \
   -e TZ=Asia/Shanghai \
   -v /opt/sub-manager/data:/data \
-  sub-manager:v3.3.1
+  sub-manager:v3.3.2
 ```
 
 容器只暴露 `7777`，数据库、缓存、密钥和输出均位于 `/data`。重建或升级容器时必须保留该目录。

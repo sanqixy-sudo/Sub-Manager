@@ -32,7 +32,13 @@ def prepare_node_state(subscription_id: int, nodes: list[NormalizedNode]) -> lis
         key = _node_key(subscription_id, node.fingerprint)
         current = redact(comparison_name(node.original_name), 160)
         old = existing.get(key)
-        if old:
+        if not node.rename_managed:
+            baseline = current
+            status = "confirmed"
+            previous = None
+            alias = old.get("alias") if old else None
+            first_seen = str(old["first_seen_at"]) if old else utcnow_iso()
+        elif old:
             baseline = str(old["baseline_name"])
             status = str(old["status"])
             previous = old.get("previous_name")

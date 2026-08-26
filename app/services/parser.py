@@ -31,6 +31,7 @@ class NormalizedNode:
     previous_name: str | None = None
     traffic: str = ""
     reset: str = ""
+    rename_managed: bool = False
 
     def __post_init__(self) -> None:
         if not self.original_name:

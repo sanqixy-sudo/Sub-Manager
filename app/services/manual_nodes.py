@@ -91,8 +91,12 @@ def import_manual_nodes(subscription_id: int, content: str) -> list[dict[str, An
 def list_manual_nodes(subscription_id: int) -> list[dict[str, Any]]:
     with db() as conn:
         rows = [dict(x) for x in conn.execute(
-            "SELECT id,name,protocol,node_key,enabled,sort_order,created_at,updated_at FROM manual_nodes "
-            "WHERE subscription_id=? ORDER BY sort_order,id", (subscription_id,))]
+            """SELECT m.id,m.name,m.protocol,m.node_key,m.enabled,m.sort_order,m.created_at,m.updated_at,
+               (SELECT s.final_name FROM node_snapshots s
+                WHERE s.subscription_id=m.subscription_id AND s.node_key=m.node_key
+                ORDER BY s.position LIMIT 1) AS final_name
+               FROM manual_nodes m WHERE m.subscription_id=? ORDER BY m.sort_order,m.id""",
+            (subscription_id,))]
     for row in rows:
         row["enabled"] = bool(row["enabled"])
     return rows
