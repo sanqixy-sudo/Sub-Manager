@@ -25,7 +25,19 @@ jobs:
       - run: npm run build
         working-directory: frontend
       - run: pip install -r requirements-dev.txt
-      - run: pytest -q
+      - name: Run backend tests
+        shell: bash
+        run: |
+          set +e
+          pytest -q 2>&1 | tee pytest-output.txt
+          test_status=${PIPESTATUS[0]}
+          {
+            echo '### Backend test output'
+            echo '```text'
+            cat pytest-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit "$test_status"
 
   frontend:
     runs-on: ubuntu-latest
