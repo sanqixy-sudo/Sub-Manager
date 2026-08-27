@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 
 
-APP_VERSION = "3.3.2"
+APP_VERSION = "3.4.0"
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "submanager.db"
 CACHE_DIR = DATA_DIR / "cache"
@@ -34,8 +34,8 @@ HEALTH_GOOGLE_URL = "https://www.google.com/generate_204"
 
 
 CLIENT_TYPES: dict[str, dict[str, object]] = {
-    "mihomo": {"label": "Mihomo / Clash Meta", "target": "clash", "ext": "yaml", "rules": True},
-    "clash": {"label": "Clash", "target": "clash", "ext": "yaml", "rules": True},
+    "mihomo": {"label": "Mihomo / Clash Verge / Clash Meta（推荐）", "target": "clash", "ext": "yaml", "rules": True},
+    "clash": {"label": "Clash YAML（兼容 Mihomo）", "target": "clash", "ext": "yaml", "rules": True},
     "clashr": {"label": "ClashR", "target": "clashr", "ext": "yaml", "rules": True},
     "surge2": {"label": "Surge 2", "target": "surge", "ver": "2", "ext": "conf", "rules": True},
     "surge3": {"label": "Surge 3", "target": "surge", "ver": "3", "ext": "conf", "rules": True},

@@ -28,10 +28,15 @@ def prepare_node_state(subscription_id: int, nodes: list[NormalizedNode]) -> lis
             "SELECT * FROM node_preferences WHERE subscription_id=?", (subscription_id,)
         )}
     prepared: list[dict[str, Any]] = []
+    used_orders = [int(item.get("sort_order") or 0) for item in existing.values()]
+    next_order = max(used_orders, default=-1) + 1
     for node in nodes:
         key = _node_key(subscription_id, node.fingerprint)
         current = redact(comparison_name(node.original_name), 160)
         old = existing.get(key)
+        sort_order = int(old.get("sort_order") or 0) if old else next_order
+        if not old:
+            next_order += 1
         if not node.rename_managed:
             baseline = current
             status = "confirmed"
@@ -58,7 +63,7 @@ def prepare_node_state(subscription_id: int, nodes: list[NormalizedNode]) -> lis
         apply_alias(node, str(alias) if alias else None, status != "confirmed")
         prepared.append({
             "node_key": key, "alias": alias, "baseline_name": baseline, "current_name": current,
-            "status": status, "previous_name": previous, "first_seen_at": first_seen,
+            "status": status, "previous_name": previous, "first_seen_at": first_seen, "sort_order": sort_order,
         })
     ensure_unique_names(nodes)
     return prepared
@@ -73,12 +78,12 @@ def store_node_snapshot(subscription_id: int, nodes: list[NormalizedNode],
         if preferences is not None:
             conn.executemany(
                 """INSERT INTO node_preferences(subscription_id,node_key,alias,baseline_name,current_name,status,
-                   previous_name,first_seen_at,last_seen_at) VALUES(?,?,?,?,?,?,?,?,?)
+                   previous_name,first_seen_at,last_seen_at,sort_order) VALUES(?,?,?,?,?,?,?,?,?,?)
                    ON CONFLICT(subscription_id,node_key) DO UPDATE SET alias=excluded.alias,
                    baseline_name=excluded.baseline_name,current_name=excluded.current_name,status=excluded.status,
-                   previous_name=excluded.previous_name,last_seen_at=excluded.last_seen_at""",
+                   previous_name=excluded.previous_name,last_seen_at=excluded.last_seen_at,sort_order=excluded.sort_order""",
                 [(subscription_id, item["node_key"], item["alias"], item["baseline_name"], item["current_name"],
-                  item["status"], item["previous_name"], item["first_seen_at"], now) for item in preferences],
+                  item["status"], item["previous_name"], item["first_seen_at"], now, item.get("sort_order", 0)) for item in preferences],
             )
         conn.executemany(
             """INSERT INTO node_snapshots(subscription_id,position,original_name,final_name,source_name,protocol,
@@ -94,6 +99,43 @@ def store_node_snapshot(subscription_id: int, nodes: list[NormalizedNode],
         )
         conn.execute("UPDATE subscriptions SET node_tracking_initialized=1 WHERE id=?", (subscription_id,))
         conn.commit()
+
+
+def apply_node_order(subscription_id: int, nodes: list[NormalizedNode]) -> list[NormalizedNode]:
+    """Apply the persisted order while keeping unseen nodes appended."""
+    try:
+        with db() as conn:
+            rows = conn.execute("SELECT node_key,sort_order FROM node_preferences WHERE subscription_id=?", (subscription_id,)).fetchall()
+    except Exception:
+        # Keep lightweight refresh/unit-test fixtures that predate V6 readable.
+        rows = []
+    order = {str(row["node_key"]): int(row["sort_order"] or 0) for row in rows}
+    indexed = list(enumerate(nodes))
+    indexed.sort(key=lambda pair: (order.get(getattr(pair[1], "node_key", ""), 10**9), pair[0]))
+    nodes[:] = [node for _, node in indexed]
+    return nodes
+
+
+def update_node_order(subscription_id: int, node_keys: list[str]) -> list[dict[str, Any]]:
+    """Persist a complete or partial order for the current effective snapshot."""
+    with db() as conn:
+        current = [str(row["node_key"]) for row in conn.execute(
+            "SELECT node_key FROM node_snapshots WHERE subscription_id=? ORDER BY position", (subscription_id,))]
+        if not current:
+            current = [str(row["node_key"]) for row in conn.execute(
+                "SELECT node_key FROM node_preferences WHERE subscription_id=? ORDER BY sort_order,node_key", (subscription_id,))]
+        if len(set(node_keys)) != len(node_keys):
+            raise HTTPException(400, "排序列表不能包含重复节点")
+        if any(key not in set(current) for key in node_keys):
+            raise HTTPException(400, "排序列表包含当前订阅组不存在的节点")
+        ordered = list(dict.fromkeys(node_keys)) + [key for key in current if key not in set(node_keys)]
+        conn.execute("BEGIN IMMEDIATE")
+        conn.executemany("UPDATE node_preferences SET sort_order=? WHERE subscription_id=? AND node_key=?",
+                         [(index, subscription_id, key) for index, key in enumerate(ordered)])
+        now = utcnow_iso()
+        conn.execute("UPDATE subscriptions SET config_revision=config_revision+1,cache_state=CASE WHEN cache_state='empty' THEN 'empty' ELSE 'stale' END,updated_at=? WHERE id=?", (now, subscription_id))
+        conn.commit()
+    return list_node_snapshots(subscription_id)["nodes"]
 
 
 def list_node_snapshots(subscription_id: int) -> dict[str, Any]:

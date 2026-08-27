@@ -8,7 +8,7 @@ from typing import Any
 import httpx
 
 from ..db import db, get_setting
-from ..operations import prepare_node_state, store_node_snapshot, store_refresh_run
+from ..operations import apply_node_order, prepare_node_state, store_node_snapshot, store_refresh_run
 from ..repository import load_subscription
 from ..security import redact, utcnow_iso
 from .cache import read_output
@@ -123,6 +123,8 @@ async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
                  str(subscription.get("rename_template") or DEFAULT_TEMPLATE),
                  subscription["upstreams"])
     node_preferences = prepare_node_state(sub_id, nodes)
+    # Keep the effective order stable across refreshes; unseen nodes are appended.
+    apply_node_order(sub_id, nodes)
 
     items = render_internal_sources(nodes)
     source_token, urls = await register_sources(items)

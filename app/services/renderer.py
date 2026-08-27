@@ -151,7 +151,7 @@ async def render_output(
                     "bytes": len(content), "renderer": "native-uri-base64", "skipped_nodes": skipped}
 
         native_mihomo = build_mihomo_document(normalized_nodes, int(output["update_interval_minutes"]), int(subscription["id"])) \
-            if output["client_type"] == "mihomo" else None
+            if output["client_type"] in {"mihomo", "clash"} else None
         if native_mihomo is not None:
             meta = {
                 "updated_at": utcnow_iso(), "content_type": "application/yaml; charset=utf-8",

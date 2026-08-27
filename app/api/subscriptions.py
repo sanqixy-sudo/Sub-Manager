@@ -7,11 +7,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..db import db, get_setting
 from ..repository import create_subscription, list_subscriptions, load_subscription, update_subscription
-from ..schemas import ManualNodeImport, ManualNodeUpdate, NodeConfirmPayload, NodePreferenceUpdate, SubscriptionIn
+from ..schemas import ManualNodeImport, ManualNodeUpdate, NodeConfirmPayload, NodePreferenceUpdate, NodeOrderPayload, SubscriptionIn
 from ..security import utcnow_iso
 from ..services.cache import delete_group, delete_upstream, move_token
 from ..services.fetcher import fetcher
-from ..operations import confirm_nodes, list_node_snapshots, list_runs, output_status, update_node_preference
+from ..operations import confirm_nodes, list_node_snapshots, list_runs, output_status, update_node_preference, update_node_order
 from ..services.refresh import refresh_subscription
 from ..services.manual_nodes import delete_manual_node, import_manual_nodes, list_manual_nodes, update_manual_node
 from .deps import require_auth
@@ -95,6 +95,15 @@ def group_runs(sub_id: int, page: int = 1, page_size: int = 30) -> dict[str, obj
 @router.get("/{sub_id}/nodes")
 def group_nodes(sub_id: int) -> dict[str, object]:
     return list_node_snapshots(sub_id)
+
+
+@router.put("/{sub_id}/nodes/order")
+async def reorder_group_nodes(sub_id: int, payload: NodeOrderPayload) -> dict[str, object]:
+    load_subscription(sub_id, include_secrets=False)
+    update_node_order(sub_id, payload.node_keys)
+    result = await refresh_subscription(sub_id, "manual")
+    return {"ok": result.get("status") in {"ok", "partial"}, "refresh": result,
+            "nodes": list_node_snapshots(sub_id)}
 
 
 @router.put("/{sub_id}/nodes/{node_key}")

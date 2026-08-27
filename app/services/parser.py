@@ -199,6 +199,10 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
 
 def parse_subscription(body: bytes, source_name: str, pseudo_filter: re.Pattern[str]) -> ParseResult:
     text = body.decode("utf-8", "replace").lstrip("\ufeff").strip()
+    # Accept URI text copied from Markdown/JSON where punctuation is escaped
+    # (for example ``vless\://host\:443``). This only removes escapes before
+    # URI syntax characters and leaves backslashes in credentials untouched.
+    text = re.sub(r"\\(?=[:@./?#=&%])", "", text)
     try:
         document = yaml.safe_load(text)
     except yaml.YAMLError:

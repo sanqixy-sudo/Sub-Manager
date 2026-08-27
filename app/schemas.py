@@ -92,6 +92,10 @@ class NodeConfirmPayload(BaseModel):
     node_keys: list[str] | None = Field(default=None, max_length=1000)
 
 
+class NodeOrderPayload(BaseModel):
+    node_keys: list[str] = Field(min_length=1, max_length=5000)
+
+
 class ManualNodeImport(BaseModel):
     content: str = Field(min_length=1, max_length=8 * 1024 * 1024)
 

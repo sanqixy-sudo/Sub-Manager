@@ -53,3 +53,26 @@ def test_v2ray_reality_uses_native_base64_uri_output(monkeypatch, tmp_path) -> N
     assert result["ok"] and result["renderer"] == "native-uri-base64"
     assert decoded.startswith("vless://") and "security=reality" in decoded and "pbk=public-key-value" in decoded
     assert saved["meta"]["skipped_nodes"] == 0
+
+
+def test_clash_output_uses_native_yaml_for_vless(monkeypatch) -> None:
+    saved = {}
+    monkeypatch.setattr(renderer, "write_output", lambda token, slug, body, meta: saved.update(body=body, meta=meta))
+    node = NormalizedNode("Reality", "fp", "Provider", proxy={
+        "name": "Reality", "type": "vless", "server": "node.invalid", "port": 443,
+        "uuid": "11111111-1111-4111-8111-111111111111", "tls": True,
+    })
+
+    class Client:
+        async def get(self, *args, **kwargs):
+            raise AssertionError("Clash YAML must use native rendering for normalized proxy nodes")
+
+    result = asyncio.run(render_output(
+        Client(), {"id": 0, "token": "group-token", "config_revision": 4},
+        {"client_type": "clash", "name": "Clash", "slug": "clash", "update_interval_minutes": 60},
+        ["http://internal/source.yaml"], [], 1, 0, [node],
+    ))
+    document = yaml.safe_load(saved["body"])
+    assert result["ok"] and result["renderer"] == "native-mihomo"
+    assert document["proxies"][0]["type"] == "vless"
+    assert saved["meta"]["config_revision"] == 4

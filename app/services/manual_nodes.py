@@ -124,19 +124,40 @@ def update_manual_node(subscription_id: int, manual_id: int, *, enabled: bool | 
         row = conn.execute("SELECT * FROM manual_nodes WHERE id=? AND subscription_id=?", (manual_id, subscription_id)).fetchone()
     if not row:
         raise HTTPException(404, "手动节点不存在")
+    old_key = str(row["node_key"])
     values: dict[str, Any] = {"enabled": int(enabled) if enabled is not None else int(row["enabled"]),
                               "sort_order": sort_order if sort_order is not None else int(row["sort_order"]),
-                              "name": row["name"], "protocol": row["protocol"], "node_key": row["node_key"],
+                              "name": row["name"], "protocol": row["protocol"], "node_key": old_key,
                               "fingerprint": "", "ciphertext": row["ciphertext"], "nonce": row["nonce"]}
+    new_key = old_key
     if content is not None:
         nodes = parse_manual_content(content)
         if len(nodes) != 1:
             raise HTTPException(400, "替换单个节点时只能提交一条配置")
         node = nodes[0]
+        new_key = node_key_for(subscription_id, node.fingerprint)
         values.update(name=redact(node.original_name, 160), protocol=node.protocol,
-                      node_key=node_key_for(subscription_id, node.fingerprint), fingerprint="")
+                      node_key=new_key, fingerprint="")
         values["ciphertext"], values["nonce"] = _encode(node)
     with db() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        if new_key != old_key and conn.execute(
+            "SELECT 1 FROM manual_nodes WHERE subscription_id=? AND node_key=? AND id<>?",
+            (subscription_id, new_key, manual_id)).fetchone():
+            raise HTTPException(409, "替换后的节点已存在")
+        # Move the opaque preference identity so an existing alias, confirmation
+        # state, category membership and health history survive content edits.
+        if new_key != old_key:
+            pref = conn.execute("SELECT * FROM node_preferences WHERE subscription_id=? AND node_key=?",
+                                (subscription_id, old_key)).fetchone()
+            if pref and not conn.execute("SELECT 1 FROM node_preferences WHERE subscription_id=? AND node_key=?",
+                                         (subscription_id, new_key)).fetchone():
+                conn.execute("UPDATE node_preferences SET node_key=? WHERE subscription_id=? AND node_key=?",
+                             (new_key, subscription_id, old_key))
+            conn.execute("UPDATE proxy_category_nodes SET node_key=? WHERE node_key=? AND category_id IN "
+                         "(SELECT id FROM proxy_categories WHERE subscription_id=?)", (new_key, old_key, subscription_id))
+            conn.execute("UPDATE node_health_latest SET node_key=? WHERE subscription_id=? AND node_key=?",
+                         (new_key, subscription_id, old_key))
         conn.execute("""UPDATE manual_nodes SET name=?,protocol=?,node_key=?,fingerprint=?,ciphertext=?,nonce=?,
                      enabled=?,sort_order=?,updated_at=? WHERE id=? AND subscription_id=?""",
                      (values["name"], values["protocol"], values["node_key"], values["fingerprint"],

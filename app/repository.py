@@ -83,7 +83,9 @@ def load_subscription(sub_id: int, *, include_secrets: bool = True) -> dict[str,
     data["next_refresh_at"] = _next_refresh(data)
     with db() as conn:
         data["pending_node_count"] = int(conn.execute(
-            "SELECT COUNT(*) FROM node_preferences WHERE subscription_id=? AND status!='confirmed'", (sub_id,)
+            """SELECT COUNT(*) FROM node_preferences p
+               JOIN node_snapshots n ON n.subscription_id=p.subscription_id AND n.node_key=p.node_key
+               WHERE p.subscription_id=? AND p.status!='confirmed'""", (sub_id,)
         ).fetchone()[0])
     if not include_secrets:
         data.pop("token", None)

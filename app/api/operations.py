@@ -26,7 +26,10 @@ def overview() -> dict[str, object]:
                 for name in ("ok", "partial", "stale", "error", "empty")}
     recent = list_runs(page=1, page_size=8)["items"]
     with db() as conn:
-        health_rows = [dict(row) for row in conn.execute("SELECT status,google_ok FROM node_health_latest")]
+        health_rows = [dict(row) for row in conn.execute(
+            """SELECT h.status,h.google_ok FROM node_health_latest h
+               JOIN node_snapshots n ON n.subscription_id=h.subscription_id AND n.node_key=h.node_key"""
+        )]
     health = {
         "tested": len(health_rows),
         "available": sum(1 for row in health_rows if row["status"] in {"healthy", "google_blocked", "connectivity_target_failed"}),

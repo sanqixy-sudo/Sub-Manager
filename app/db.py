@@ -22,7 +22,7 @@ from .config import (
 from .security import hash_password, utcnow_iso
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 
 def connect() -> sqlite3.Connection:
@@ -280,6 +280,12 @@ def init_db() -> None:
             "reset": "TEXT NOT NULL DEFAULT ''",
         }.items():
             _ensure_column(conn, "node_snapshots", name, ddl)
+        _ensure_column(conn, "node_preferences", "sort_order", "INTEGER NOT NULL DEFAULT 0")
+        # V8 persists effective node order independently from volatile names and traffic counters.
+        if old_version < 8:
+            conn.execute("""UPDATE node_preferences SET sort_order=COALESCE(
+                (SELECT position FROM node_snapshots n WHERE n.subscription_id=node_preferences.subscription_id
+                 AND n.node_key=node_preferences.node_key), sort_order)""")
 
         if old_version < 6:
             conn.execute(
