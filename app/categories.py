@@ -17,7 +17,7 @@ def list_categories(subscription_id: int) -> list[dict[str, Any]]:
             item["source_ids"] = [int(x[0]) for x in conn.execute(
                 "SELECT upstream_id FROM proxy_category_sources WHERE category_id=? ORDER BY upstream_id", (item["id"],))]
             item["node_keys"] = [str(x[0]) for x in conn.execute(
-                "SELECT node_key FROM proxy_category_nodes WHERE category_id=? ORDER BY node_key", (item["id"],))]
+                "SELECT node_key FROM proxy_category_nodes WHERE category_id=? ORDER BY rowid", (item["id"],))]
     return categories
 
 
@@ -91,9 +91,14 @@ def delete_category(subscription_id: int, category_id: int) -> None:
 def category_groups(subscription_id: int, nodes: list[Any]) -> list[dict[str, Any]]:
     result = []
     for category in list_categories(subscription_id):
-        sources, keys = set(category["source_ids"]), set(category["node_keys"])
-        names = [node.name for node in nodes if node.node_key in keys or (node.source_id is not None and node.source_id in sources)]
-        names = list(dict.fromkeys(names))
+        sources, keys = set(category["source_ids"]), list(category["node_keys"])
+        by_key = {node.node_key: node for node in nodes}
+        # Whole-source membership follows the global node order. Explicit
+        # assignments not already covered by a source follow their saved order.
+        selected = [node for node in nodes if node.source_id is not None and node.source_id in sources]
+        selected_keys = {node.node_key for node in selected}
+        selected.extend(by_key[key] for key in keys if key in by_key and key not in selected_keys)
+        names = list(dict.fromkeys(node.name for node in selected))
         if names:
             label = (str(category["icon"]).strip() + " " if category["icon"] else "") + str(category["name"])
             result.append({"name": label, "type": "select", "proxies": names})
