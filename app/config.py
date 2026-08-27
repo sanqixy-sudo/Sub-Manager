@@ -30,7 +30,7 @@ SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 MIHOMO_BINARY = os.getenv("MIHOMO_BINARY", "/usr/local/bin/mihomo")
 MIHOMO_VERSION = "1.19.30"
 HEALTH_CONNECTIVITY_URL = "https://cp.cloudflare.com/generate_204"
-HEALTH_GOOGLE_URL = "https://www.google.com/generate_204"
+HEALTH_GOOGLE_URL = "https://www.gstatic.com/generate_204"
 
 
 CLIENT_TYPES: dict[str, dict[str, object]] = {
