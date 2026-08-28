@@ -15,7 +15,7 @@ from .api import auth, categories, health as health_api, operations, settings, s
 from .config import APP_VERSION, CLIENT_TYPES, RULE_PRESET, STATIC_DIR, SUBCONVERTER_URL
 from .db import db, get_setting, init_db
 from .repository import load_subscription, parse_iso
-from .security import redact, safe_filename
+from .security import ip_allowed, redact, safe_filename
 from .services.cache import read_output
 from .services.fetcher import fetcher
 from .services.refresh import refresh_subscription, runtime_status, scheduler_loop
@@ -125,6 +125,15 @@ async def public_subscription(token: str, slug: str, request: Request) -> Respon
     if not row:
         raise HTTPException(404, "订阅不存在")
     group = load_subscription(int(row["id"]))
+    whitelist = str(group.get("ip_whitelist") or "")
+    if whitelist.strip():
+        forwarded = request.headers.get("x-forwarded-for", "")
+        client_ip = forwarded.split(",")[0].strip() if forwarded.strip() else (
+            request.client.host if request.client else ""
+        )
+        if not ip_allowed(whitelist, client_ip):
+            # 404 与“订阅不存在”相同，不向外泄漏白名单存在性
+            raise HTTPException(404, "订阅不存在")
     output = next((x for x in group["outputs"] if x["slug"] == slug and x["enabled"]), None)
     if not output:
         raise HTTPException(404, "输出不存在")

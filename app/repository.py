@@ -106,9 +106,10 @@ def create_subscription(payload: SubscriptionIn) -> dict[str, Any]:
         conn.execute("BEGIN IMMEDIATE")
         cur = conn.execute(
             """INSERT INTO subscriptions(name,note,token,interval_minutes,enabled,rename_mode,rename_ignore,
-               rename_template,created_at,updated_at,config_revision) VALUES(?,?,?,?,?,?,?,?,?,?,1)""",
+               rename_template,ip_whitelist,created_at,updated_at,config_revision) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)""",
             (payload.name.strip(), payload.note.strip(), token, payload.interval_minutes, int(payload.enabled),
-             payload.rename_mode, payload.rename_ignore.strip(), payload.rename_template.strip(), ts, ts),
+             payload.rename_mode, payload.rename_ignore.strip(), payload.rename_template.strip(),
+             payload.ip_whitelist.strip(), ts, ts),
         )
         sub_id = int(cur.lastrowid)
         for idx, upstream in enumerate(payload.upstreams):
@@ -139,10 +140,11 @@ def update_subscription(sub_id: int, payload: SubscriptionIn) -> tuple[dict[str,
         keep_out_ids = {x.id for x in payload.outputs if x.id is not None}
         conn.execute(
             """UPDATE subscriptions SET name=?,note=?,interval_minutes=?,enabled=?,rename_mode=?,rename_ignore=?,
-               rename_template=?,updated_at=?,config_revision=config_revision+1,
+               rename_template=?,ip_whitelist=?,updated_at=?,config_revision=config_revision+1,
                cache_state=CASE WHEN cache_state='empty' THEN 'empty' ELSE 'stale' END WHERE id=?""",
             (payload.name.strip(), payload.note.strip(), payload.interval_minutes, int(payload.enabled),
-             payload.rename_mode, payload.rename_ignore.strip(), payload.rename_template.strip(), ts, sub_id),
+             payload.rename_mode, payload.rename_ignore.strip(), payload.rename_template.strip(),
+             payload.ip_whitelist.strip(), ts, sub_id),
         )
         for idx, upstream in enumerate(payload.upstreams):
             if upstream.id and conn.execute("SELECT 1 FROM upstreams WHERE id=? AND subscription_id=?", (upstream.id, sub_id)).fetchone():

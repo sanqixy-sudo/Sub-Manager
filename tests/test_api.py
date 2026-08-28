@@ -149,7 +149,7 @@ def test_v2_migration_preserves_token_and_creates_backup(tmp_path, monkeypatch) 
     with dbmod.db() as upgraded:
         row=upgraded.execute("SELECT id,token,config_revision FROM subscriptions").fetchone()
         assert tuple(row)==(7,"fixed-token-unchanged",1)
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0]==8
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0]==9
         assert row["id"] == 7
     assert len(list((tmp_path/"backups").glob("submanager-v2-*.db")))==1
 
@@ -171,7 +171,7 @@ def test_v3_migration_adds_rename_settings_and_creates_backup(tmp_path, monkeypa
     with dbmod.db() as upgraded:
         row = upgraded.execute("SELECT token,config_revision,rename_mode,rename_ignore,rename_template FROM subscriptions").fetchone()
         assert tuple(row) == ("v3-token", 5, "passthrough", "", "{index}|{flag}|{name}|{traffic}|{reset}")
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 8
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
     assert len(list((tmp_path / "backups").glob("submanager-v3-*.db"))) == 1
 
 

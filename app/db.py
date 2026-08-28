@@ -22,7 +22,7 @@ from .config import (
 from .security import hash_password, utcnow_iso
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 
 def connect() -> sqlite3.Connection:
@@ -251,6 +251,7 @@ def init_db() -> None:
             "rename_ignore": "TEXT NOT NULL DEFAULT ''",
             "rename_template": "TEXT NOT NULL DEFAULT '{index}-{flag}-{name}-{traffic}-{reset}'",
             "node_tracking_initialized": "INTEGER NOT NULL DEFAULT 0",
+            "ip_whitelist": "TEXT NOT NULL DEFAULT ''",
         }.items():
             _ensure_column(conn, "subscriptions", name, ddl)
         for name, ddl in {

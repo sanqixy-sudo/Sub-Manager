@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ipaddress
+
 from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
@@ -38,8 +40,22 @@ class SubscriptionIn(BaseModel):
     rename_mode: str = Field(default="passthrough", pattern=r"^(passthrough|smart)$")
     rename_ignore: str = Field(default="", max_length=1000)
     rename_template: str = Field(default=DEFAULT_RENAME_TEMPLATE, min_length=1, max_length=300)
+    ip_whitelist: str = Field(default="", max_length=10000)
     upstreams: list[UpstreamIn] = Field(default_factory=list)
     outputs: list[OutputIn] = Field(min_length=1)
+
+    @field_validator("ip_whitelist")
+    @classmethod
+    def validate_ip_whitelist(cls, value: str) -> str:
+        lines = [line.strip() for line in value.splitlines() if line.strip()]
+        if len(lines) > 100:
+            raise ValueError("IP 白名单最多 100 行")
+        for index, line in enumerate(lines, start=1):
+            try:
+                ipaddress.ip_network(line, strict=False)
+            except ValueError:
+                raise ValueError(f"IP 白名单第 {index} 行不是合法的 IP 或网段: {line[:80]}")
+        return "\n".join(lines)
 
 
 class SettingsUpdate(BaseModel):

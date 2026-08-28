@@ -1,7 +1,368 @@
 <script setup lang="ts">
-import{computed,onMounted,ref}from'vue';import{useRouter}from'vue-router';import{ElMessage,ElMessageBox}from'element-plus';import{Plus,RefreshCw,Search,MoreHorizontal,Copy,Server,AlertTriangle}from'lucide-vue-next';import{api}from'../api';import{useAppStore}from'../stores/app';import type{Group}from'../types';import StatusTag from'../components/StatusTag.vue';import{copyText}from'../utils';
-const store=useAppStore(),router=useRouter(),search=ref(''),statusFilter=ref(''),cacheFilter=ref(''),drawer=ref(false),selected=ref<Group|null>(null),urls=ref<any[]>([]),diagnostics=ref<any[]>([]),busy=ref<number|null>(null);const priority:Record<string,number>={error:0,stale:1,partial:2,empty:3,ok:4};const shown=computed(()=>store.groups.filter(g=>`${g.name} ${g.note} ${g.upstreams.map(x=>x.name).join(' ')}`.toLowerCase().includes(search.value.toLowerCase())).filter(g=>!statusFilter.value||g.last_refresh_status===statusFilter.value).filter(g=>!cacheFilter.value||g.cache_state===cacheFilter.value).sort((a,b)=>(priority[a.last_refresh_status||'empty']??9)-(priority[b.last_refresh_status||'empty']??9)||(b.pending_node_count||0)-(a.pending_node_count||0)));const dt=(v?:string)=>v?new Date(v).toLocaleString('zh-CN',{hour12:false}):'—';const duration=(v?:number)=>v==null?'—':v<1000?`${v} ms`:`${(v/1000).toFixed(1)} s`;const next=(v?:string)=>{if(!v)return'—';const m=Math.ceil((new Date(v).getTime()-Date.now())/60000);return m<=0?'即将刷新':m<60?`${m} 分钟后`:`${Math.floor(m/60)} 小时后`};onMounted(()=>store.loadGroups());
-async function refresh(id:number){busy.value=id;try{const r:any=await api(`/api/subscriptions/${id}/refresh`,{method:'POST'});r.status==='ok'?ElMessage.success(`刷新完成，${r.node_count} 个节点`):ElMessage.warning(`刷新结果：${r.status}`);await store.load();selected.value=store.groups.find(x=>x.id===id)||selected.value}catch(e:any){ElMessage.error(e.message)}finally{busy.value=null}}async function openDetail(group:Group){selected.value=group;drawer.value=true;diagnostics.value=[];try{urls.value=(await api<any>(`/api/subscriptions/${group.id}/public-urls`)).urls}catch(e:any){ElMessage.error(e.message)}}async function diagnose(){if(!selected.value)return;busy.value=selected.value.id;try{diagnostics.value=(await api<any>(`/api/subscriptions/${selected.value.id}/diagnose`,{method:'POST'})).results}catch(e:any){ElMessage.error(e.message)}finally{busy.value=null}}async function copy(v:string){await copyText(v);ElMessage.success('订阅地址已复制')}async function rotate(g:Group){await ElMessageBox.confirm('旧订阅地址会立即失效，确认重置公开 Token？','重置 Token',{type:'warning'});urls.value=(await api<any>(`/api/subscriptions/${g.id}/rotate-token`,{method:'POST'})).urls}async function remove(g:Group){await ElMessageBox.confirm(`将永久删除“${g.name}”及其缓存，确认继续？`,'删除订阅组',{type:'error'});await api(`/api/subscriptions/${g.id}`,{method:'DELETE'});drawer.value=false;await store.load()}async function duplicate(g:Group){const d:any=await api(`/api/subscriptions/${g.id}`);sessionStorage.setItem('duplicateGroup',JSON.stringify({...d,id:undefined,name:`${d.name} 副本`,upstreams:d.upstreams.map((x:any)=>({...x,id:undefined})),outputs:d.outputs.map((x:any)=>({...x,id:undefined}))}));router.push('/groups/new')}
+import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import { Plus, RefreshCw, Search, MoreHorizontal, Copy, Server, AlertTriangle } from 'lucide-vue-next'
+import { api } from '../api'
+import { useAppStore } from '../stores/app'
+import type { Group } from '../types'
+import StatusTag from '../components/StatusTag.vue'
+import { copyText, dt, duration, statusPriority } from '../utils'
+
+const store = useAppStore()
+const router = useRouter()
+const search = ref('')
+const statusFilter = ref('')
+const cacheFilter = ref('')
+const drawer = ref(false)
+const selected = ref<Group | null>(null)
+const urls = ref<any[]>([])
+const diagnostics = ref<any[]>([])
+const busy = ref<number | null>(null)
+const copying = ref<number | null>(null)
+
+const shown = computed(() =>
+  store.groups
+    .filter(g => `${g.name} ${g.note} ${g.upstreams.map(x => x.name).join(' ')}`.toLowerCase().includes(search.value.toLowerCase()))
+    .filter(g => !statusFilter.value || g.last_refresh_status === statusFilter.value)
+    .filter(g => !cacheFilter.value || g.cache_state === cacheFilter.value)
+    .sort((a, b) =>
+      statusPriority(a.last_refresh_status) - statusPriority(b.last_refresh_status) ||
+      (b.pending_node_count || 0) - (a.pending_node_count || 0)))
+
+const next = (v?: string) => {
+  if (!v) return '—'
+  const m = Math.ceil((new Date(v).getTime() - Date.now()) / 60000)
+  return m <= 0 ? '即将刷新' : m < 60 ? `${m} 分钟后` : `${Math.floor(m / 60)} 小时后`
+}
+
+const enabledOutputs = (g: Group) => g.outputs.filter(x => x.enabled)
+
+onMounted(() => store.loadGroups())
+
+async function refresh(id: number) {
+  busy.value = id
+  try {
+    const r: any = await api(`/api/subscriptions/${id}/refresh`, { method: 'POST' })
+    r.status === 'ok' ? ElMessage.success(`刷新完成，${r.node_count} 个节点`) : ElMessage.warning(`刷新结果：${r.status}`)
+    await store.load()
+    selected.value = store.groups.find(x => x.id === id) || selected.value
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    busy.value = null
+  }
+}
+
+async function openDetail(group: Group) {
+  selected.value = group
+  drawer.value = true
+  diagnostics.value = []
+  try {
+    urls.value = (await api<any>(`/api/subscriptions/${group.id}/public-urls`)).urls
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function diagnose() {
+  if (!selected.value) return
+  busy.value = selected.value.id
+  try {
+    diagnostics.value = (await api<any>(`/api/subscriptions/${selected.value.id}/diagnose`, { method: 'POST' })).results
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    busy.value = null
+  }
+}
+
+async function copy(v: string) {
+  await copyText(v)
+  ElMessage.success('订阅地址已复制')
+}
+
+/** 行内复制：复制该组指定 slug（默认第一个）的公开订阅地址 */
+async function copyGroupUrl(g: Group, slug?: string) {
+  copying.value = g.id
+  try {
+    const list: any[] = (await api<any>(`/api/subscriptions/${g.id}/public-urls`)).urls
+    const target = slug ? list.find(u => u.slug === slug) : list[0]
+    if (!target) {
+      ElMessage.warning('该组暂无可用订阅地址')
+      return
+    }
+    await copyText(target.url)
+    ElMessage.success('订阅地址已复制')
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    copying.value = null
+  }
+}
+
+async function rotate(g: Group) {
+  try {
+    await ElMessageBox.confirm('旧订阅地址会立即失效，确认重置公开 Token？', '重置 Token', { type: 'warning' })
+  } catch {
+    return // 用户取消，静默
+  }
+  try {
+    urls.value = (await api<any>(`/api/subscriptions/${g.id}/rotate-token`, { method: 'POST' })).urls
+    ElMessage.success('Token 已重置')
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function remove(g: Group) {
+  try {
+    await ElMessageBox.confirm(`将永久删除“${g.name}”及其缓存，确认继续？`, '删除订阅组', { type: 'error' })
+  } catch {
+    return // 用户取消，静默
+  }
+  try {
+    await api(`/api/subscriptions/${g.id}`, { method: 'DELETE' })
+    drawer.value = false
+    await store.load()
+    ElMessage.success('订阅组已删除')
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  }
+}
+
+async function duplicate(g: Group) {
+  try {
+    const d: any = await api(`/api/subscriptions/${g.id}`)
+    sessionStorage.setItem('duplicateGroup', JSON.stringify({
+      ...d,
+      id: undefined,
+      name: `${d.name} 副本`,
+      upstreams: d.upstreams.map((x: any) => ({ ...x, id: undefined })),
+      outputs: d.outputs.map((x: any) => ({ ...x, id: undefined })),
+    }))
+    await router.push('/groups/new')
+  } catch (e: any) {
+    ElMessage.error(e?.message || '复制组失败，请稍后重试')
+  }
+}
 </script>
-<template><section class="page"><header class="page-head"><div><p class="eyebrow">SUBSCRIPTION GROUPS</p><h1>订阅组</h1><p>异常优先排列，集中维护固定客户端订阅地址。</p></div><div class="head-actions"><el-button @click="store.load"><RefreshCw/>刷新</el-button><el-button type="primary" @click="router.push('/groups/new')"><Plus/>新建订阅组</el-button></div></header><div class="panel table-panel"><div class="toolbar group-toolbar"><div class="search"><Search/><input v-model="search" placeholder="搜索订阅组或上游名称"></div><el-select v-model="statusFilter" clearable placeholder="全部状态"><el-option label="正常" value="ok"/><el-option label="部分异常" value="partial"/><el-option label="旧缓存" value="stale"/><el-option label="失败" value="error"/></el-select><el-select v-model="cacheFilter" clearable placeholder="全部缓存"><el-option label="新鲜" value="fresh"/><el-option label="旧缓存" value="stale"/><el-option label="暂无" value="empty"/></el-select><span>共 {{shown.length}} 个订阅组</span></div><div class="desktop-table"><el-table :data="shown" row-key="id" @row-click="openDetail"><el-table-column label="订阅组" min-width="220"><template #default="{row}"><div class="group-cell"><span class="group-avatar">{{row.name.slice(0,1)}}</span><div><b>{{row.name}}</b><small>{{row.note||'暂无备注'}}</small></div></div></template></el-table-column><el-table-column label="状态" width="122"><template #default="{row}"><StatusTag :status="row.last_refresh_status"/></template></el-table-column><el-table-column label="上游健康" width="118"><template #default="{row}"><b>{{row.upstreams.filter((x:any)=>x.last_status==='ok').length}}</b><span class="muted"> / {{row.upstreams.filter((x:any)=>x.enabled).length}}</span></template></el-table-column><el-table-column label="有效节点" width="104"><template #default="{row}"><b>{{row.node_count||0}}</b><small v-if="row.filtered_count" class="filtered">−{{row.filtered_count}} 过滤</small><small v-if="row.pending_node_count" class="pending-count"><AlertTriangle/>{{row.pending_node_count}} 待确认</small></template></el-table-column><el-table-column label="输出" width="78"><template #default="{row}">{{row.outputs.filter((x:any)=>x.enabled).length}}</template></el-table-column><el-table-column label="缓存" width="92"><template #default="{row}"><span class="cache" :class="row.cache_state">{{row.cache_state==='fresh'?'新鲜':row.cache_state==='stale'?'旧缓存':'暂无'}}</span></template></el-table-column><el-table-column label="上次刷新" min-width="154"><template #default="{row}"><span>{{dt(row.last_success_at)}}</span><small>{{duration(row.last_duration_ms)}} · {{next(row.next_refresh_at)}}</small></template></el-table-column><el-table-column label="操作" width="164" fixed="right"><template #default="{row}"><div class="row-actions" @click.stop><el-button link type="primary" :loading="busy===row.id" @click="refresh(row.id)">刷新</el-button><el-button link @click="openDetail(row)">快速详情</el-button><el-dropdown><button class="more"><MoreHorizontal/></button><template #dropdown><el-dropdown-menu><el-dropdown-item @click="router.push(`/groups/${row.id}/detail`)">完整详情</el-dropdown-item><el-dropdown-item @click="router.push(`/groups/${row.id}/edit`)">编辑</el-dropdown-item><el-dropdown-item @click="duplicate(row)">复制组</el-dropdown-item><el-dropdown-item divided @click="remove(row)">删除</el-dropdown-item></el-dropdown-menu></template></el-dropdown></div></template></el-table-column></el-table></div><div class="mobile-list"><article v-for="g in shown" :key="g.id" @click="openDetail(g)"><header><div class="group-cell"><span class="group-avatar">{{g.name.slice(0,1)}}</span><div><b>{{g.name}}</b><small>{{g.note||'暂无备注'}}</small></div></div><StatusTag :status="g.last_refresh_status"/></header><div class="mobile-metrics"><span><b>{{g.upstreams.filter(x=>x.last_status==='ok').length}}/{{g.upstreams.filter(x=>x.enabled).length}}</b>上游健康</span><span><b>{{g.node_count||0}}</b>有效节点<i v-if="g.pending_node_count" class="pending-count">{{g.pending_node_count}} 待确认</i></span><span><b>{{g.outputs.filter(x=>x.enabled).length}}</b>输出</span></div><footer><span>{{dt(g.last_success_at)}}</span><el-button link type="primary" @click.stop="refresh(g.id)">刷新</el-button></footer></article></div><div v-if="!shown.length" class="empty"><Server/><h3>没有符合条件的订阅组</h3><p>调整筛选条件，或新建一个订阅组。</p></div></div>
-<el-drawer v-model="drawer" size="min(680px,100%)"><template #header><div v-if="selected"><p class="eyebrow">QUICK VIEW</p><h2>{{selected.name}}</h2><StatusTag :status="selected.last_refresh_status"/></div></template><template v-if="selected"><div class="drawer-actions"><el-button type="primary" @click="router.push(`/groups/${selected.id}/detail`)">查看完整详情</el-button><el-button :loading="busy===selected.id" @click="refresh(selected.id)"><RefreshCw/>刷新</el-button><el-button @click="router.push(`/groups/${selected.id}/edit`)">编辑配置</el-button></div><el-alert v-if="selected.last_error" type="warning" title="最近刷新异常" :description="selected.last_error" :closable="false" show-icon/><div class="drawer-grid"><div><span>有效节点</span><b>{{selected.node_count}}</b></div><div><span>待确认节点</span><b :class="{'pending-value':selected.pending_node_count}">{{selected.pending_node_count||0}}</b></div><div><span>刷新耗时</span><b>{{duration(selected.last_duration_ms)}}</b></div></div><section class="drawer-section"><header><div><h3>客户端订阅地址</h3><p>可直接添加到客户端。</p></div></header><div class="url-item" v-for="u in urls" :key="u.id"><div><b>{{store.types[u.client_type]?.label||u.client_type}}</b><code>{{u.url}}</code></div><el-button @click="copy(u.url)"><Copy/>复制</el-button></div></section><section class="drawer-section"><header><div><h3>上游健康</h3><p>仅展示脱敏诊断结果。</p></div><el-button :loading="busy===selected.id" @click="diagnose">重新诊断</el-button></header><div class="upstream-item" v-for="u in (diagnostics.length?diagnostics:selected.upstreams)" :key="u.name"><StatusTag :status="u.status||u.last_status"/><div><b>{{u.name}}</b><span>{{u.source_format||'未知格式'}} · HTTP {{u.status_code||u.last_http_status||'—'}} · {{u.duration_ms||u.last_duration_ms||0}} ms</span></div><b>{{u.node_count||0}} 节点</b></div></section><div class="drawer-foot-actions"><el-button @click="duplicate(selected!)">复制组</el-button><el-button @click="rotate(selected!)">重置 Token</el-button><el-button type="danger" plain @click="remove(selected!)">删除组</el-button></div></template></el-drawer></section></template>
+
+<template>
+  <section class="page">
+    <header class="page-head">
+      <div>
+        <p class="eyebrow">SUBSCRIPTION GROUPS</p>
+        <h1>订阅组</h1>
+        <p>异常优先排列，集中维护固定客户端订阅地址。</p>
+      </div>
+      <div class="head-actions">
+        <el-button @click="store.load"><RefreshCw />刷新</el-button>
+        <el-button type="primary" @click="router.push('/groups/new')"><Plus />新建订阅组</el-button>
+      </div>
+    </header>
+    <div class="panel table-panel">
+      <div class="toolbar group-toolbar">
+        <div class="search">
+          <Search />
+          <input v-model="search" placeholder="搜索订阅组或上游名称">
+        </div>
+        <el-select v-model="statusFilter" clearable placeholder="全部状态">
+          <el-option label="正常" value="ok" />
+          <el-option label="部分异常" value="partial" />
+          <el-option label="旧缓存" value="stale" />
+          <el-option label="失败" value="error" />
+        </el-select>
+        <el-select v-model="cacheFilter" clearable placeholder="全部缓存">
+          <el-option label="新鲜" value="fresh" />
+          <el-option label="旧缓存" value="stale" />
+          <el-option label="暂无" value="empty" />
+        </el-select>
+        <span>共 {{ shown.length }} 个订阅组</span>
+      </div>
+      <div class="desktop-table">
+        <el-table :data="shown" row-key="id" @row-click="openDetail">
+          <el-table-column label="订阅组" min-width="220">
+            <template #default="{ row }">
+              <div class="group-cell">
+                <span class="group-avatar">{{ row.name.slice(0, 1) }}</span>
+                <div>
+                  <b>{{ row.name }}</b>
+                  <small>{{ row.note || '暂无备注' }}</small>
+                </div>
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="状态" width="122">
+            <template #default="{ row }"><StatusTag :status="row.last_refresh_status" /></template>
+          </el-table-column>
+          <el-table-column label="上游健康" width="118">
+            <template #default="{ row }">
+              <b>{{ row.upstreams.filter((x: any) => x.last_status === 'ok').length }}</b>
+              <span class="muted"> / {{ row.upstreams.filter((x: any) => x.enabled).length }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="有效节点" width="104">
+            <template #default="{ row }">
+              <b>{{ row.node_count || 0 }}</b>
+              <small v-if="row.filtered_count" class="filtered">−{{ row.filtered_count }} 过滤</small>
+              <small v-if="row.pending_node_count" class="pending-count">
+                <AlertTriangle />{{ row.pending_node_count }} 待确认
+              </small>
+            </template>
+          </el-table-column>
+          <el-table-column label="输出" width="78">
+            <template #default="{ row }">{{ row.outputs.filter((x: any) => x.enabled).length }}</template>
+          </el-table-column>
+          <el-table-column label="缓存" width="92">
+            <template #default="{ row }">
+              <span class="cache" :class="row.cache_state">{{ row.cache_state === 'fresh' ? '新鲜' : row.cache_state === 'stale' ? '旧缓存' : '暂无' }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="上次刷新" min-width="154">
+            <template #default="{ row }">
+              <span>{{ dt(row.last_success_at) }}</span>
+              <small>{{ duration(row.last_duration_ms) }} · {{ next(row.next_refresh_at) }}</small>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="250" fixed="right">
+            <template #default="{ row }">
+              <div class="row-actions" @click.stop>
+                <el-button link type="primary" :loading="busy === row.id" @click="refresh(row.id)">刷新</el-button>
+                <template v-if="enabledOutputs(row).length">
+                  <el-dropdown v-if="enabledOutputs(row).length > 1" trigger="click" @command="(slug: string) => copyGroupUrl(row, slug)">
+                    <el-button link type="primary" :loading="copying === row.id">复制地址</el-button>
+                    <template #dropdown>
+                      <el-dropdown-menu>
+                        <el-dropdown-item v-for="o in enabledOutputs(row)" :key="o.id" :command="o.slug">
+                          {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                        </el-dropdown-item>
+                      </el-dropdown-menu>
+                    </template>
+                  </el-dropdown>
+                  <el-button v-else link type="primary" :loading="copying === row.id" @click="copyGroupUrl(row)">复制地址</el-button>
+                </template>
+                <el-dropdown>
+                  <button class="more"><MoreHorizontal /></button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item @click="router.push(`/groups/${row.id}/detail`)">完整详情</el-dropdown-item>
+                      <el-dropdown-item @click="router.push(`/groups/${row.id}/edit`)">编辑</el-dropdown-item>
+                      <el-dropdown-item @click="duplicate(row)">复制组</el-dropdown-item>
+                      <el-dropdown-item divided @click="remove(row)">删除</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+      </div>
+      <div class="mobile-list">
+        <article v-for="g in shown" :key="g.id" @click="openDetail(g)">
+          <header>
+            <div class="group-cell">
+              <span class="group-avatar">{{ g.name.slice(0, 1) }}</span>
+              <div>
+                <b>{{ g.name }}</b>
+                <small>{{ g.note || '暂无备注' }}</small>
+              </div>
+            </div>
+            <StatusTag :status="g.last_refresh_status" />
+          </header>
+          <div class="mobile-metrics">
+            <span><b>{{ g.upstreams.filter(x => x.last_status === 'ok').length }}/{{ g.upstreams.filter(x => x.enabled).length }}</b>上游健康</span>
+            <span>
+              <b>{{ g.node_count || 0 }}</b>有效节点
+              <i v-if="g.pending_node_count" class="pending-count">{{ g.pending_node_count }} 待确认</i>
+            </span>
+            <span><b>{{ g.outputs.filter(x => x.enabled).length }}</b>输出</span>
+          </div>
+          <footer>
+            <span>{{ dt(g.last_success_at) }}</span>
+            <div class="mobile-actions" @click.stop>
+              <template v-if="enabledOutputs(g).length">
+                <el-dropdown v-if="enabledOutputs(g).length > 1" trigger="click" @command="(slug: string) => copyGroupUrl(g, slug)">
+                  <el-button link type="primary" :loading="copying === g.id">复制地址</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item v-for="o in enabledOutputs(g)" :key="o.id" :command="o.slug">
+                        {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                      </el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <el-button v-else link type="primary" :loading="copying === g.id" @click="copyGroupUrl(g)">复制地址</el-button>
+              </template>
+              <el-button link type="primary" @click.stop="refresh(g.id)">刷新</el-button>
+            </div>
+          </footer>
+        </article>
+      </div>
+      <div v-if="!shown.length" class="empty">
+        <Server />
+        <h3>没有符合条件的订阅组</h3>
+        <p>调整筛选条件，或新建一个订阅组。</p>
+      </div>
+    </div>
+    <el-drawer v-model="drawer" size="min(680px,100%)">
+      <template #header>
+        <div v-if="selected">
+          <p class="eyebrow">QUICK VIEW</p>
+          <h2>{{ selected.name }}</h2>
+          <StatusTag :status="selected.last_refresh_status" />
+        </div>
+      </template>
+      <template v-if="selected">
+        <div class="drawer-actions">
+          <el-button type="primary" @click="router.push(`/groups/${selected.id}/detail`)">查看完整详情</el-button>
+          <el-button :loading="busy === selected.id" @click="refresh(selected.id)"><RefreshCw />刷新</el-button>
+          <el-button @click="router.push(`/groups/${selected.id}/edit`)">编辑配置</el-button>
+        </div>
+        <el-alert v-if="selected.last_error" type="warning" title="最近刷新异常" :description="selected.last_error" :closable="false" show-icon />
+        <div class="drawer-grid">
+          <div><span>有效节点</span><b>{{ selected.node_count }}</b></div>
+          <div><span>待确认节点</span><b :class="{ 'pending-value': selected.pending_node_count }">{{ selected.pending_node_count || 0 }}</b></div>
+          <div><span>刷新耗时</span><b>{{ duration(selected.last_duration_ms) }}</b></div>
+        </div>
+        <section class="drawer-section">
+          <header>
+            <div>
+              <h3>客户端订阅地址</h3>
+              <p>可直接添加到客户端。</p>
+            </div>
+          </header>
+          <div class="url-item" v-for="u in urls" :key="u.id">
+            <div>
+              <b>{{ store.types[u.client_type]?.label || u.client_type }}</b>
+              <code>{{ u.url }}</code>
+            </div>
+            <el-button @click="copy(u.url)"><Copy />复制</el-button>
+          </div>
+        </section>
+        <section class="drawer-section">
+          <header>
+            <div>
+              <h3>上游健康</h3>
+              <p>仅展示脱敏诊断结果。</p>
+            </div>
+            <el-button :loading="busy === selected.id" @click="diagnose">重新诊断</el-button>
+          </header>
+          <div class="upstream-item" v-for="u in (diagnostics.length ? diagnostics : selected.upstreams)" :key="u.name">
+            <StatusTag :status="u.status || u.last_status" />
+            <div>
+              <b>{{ u.name }}</b>
+              <span>{{ u.source_format || '未知格式' }} · HTTP {{ u.status_code || u.last_http_status || '—' }} · {{ u.duration_ms || u.last_duration_ms || 0 }} ms</span>
+            </div>
+            <b>{{ u.node_count || 0 }} 节点</b>
+          </div>
+        </section>
+        <div class="drawer-foot-actions">
+          <el-button @click="duplicate(selected!)">复制组</el-button>
+          <el-button @click="rotate(selected!)">重置 Token</el-button>
+          <el-button type="danger" plain @click="remove(selected!)">删除组</el-button>
+        </div>
+      </template>
+    </el-drawer>
+  </section>
+</template>

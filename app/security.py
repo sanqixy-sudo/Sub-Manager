@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import re
 import secrets
 from datetime import datetime, timezone
@@ -80,3 +81,27 @@ def masked_url(url: str) -> str:
 def safe_filename(value: str, default: str = "subscription") -> str:
     cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", value)
     return cleaned[:120] or default
+
+
+def ip_allowed(whitelist: str, client_ip: str) -> bool:
+    """Per-subscription public fetch gate: empty whitelist allows everyone."""
+    if not whitelist.strip():
+        return True
+    try:
+        client = ipaddress.ip_address(client_ip.strip())
+    except ValueError:
+        return False
+    for raw in whitelist.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        try:
+            network = ipaddress.ip_network(line, strict=False)
+        except ValueError:
+            continue
+        try:
+            if client in network:
+                return True
+        except TypeError:
+            continue
+    return False
