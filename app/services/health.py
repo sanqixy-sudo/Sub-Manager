@@ -374,12 +374,14 @@ async def health_scheduler_loop() -> None:
     while True:
         try:
             _scheduler_last_poll = utcnow_iso()
-            hours = int(get_setting("health_check_interval_hours", "6"))
+            # 分钟级周期；旧库仅有小时键时按 小时×60 兼容
+            minutes = int(get_setting("health_check_interval_minutes")
+                          or int(get_setting("health_check_interval_hours", "6")) * 60)
             with db() as conn:
                 row = conn.execute("SELECT started_at FROM health_check_runs WHERE trigger='scheduler' ORDER BY id DESC LIMIT 1").fetchone()
             last = parse_iso(str(row[0])) if row else None
-            due = last is None or datetime.now(timezone.utc) >= last + timedelta(hours=hours)
-            _scheduler_next_run = ((last + timedelta(hours=hours)) if last else datetime.now(timezone.utc)).isoformat()
+            due = last is None or datetime.now(timezone.utc) >= last + timedelta(minutes=minutes)
+            _scheduler_next_run = ((last + timedelta(minutes=minutes)) if last else datetime.now(timezone.utc)).isoformat()
             if due and get_setting("health_check_enabled", "1") == "1" and not (_task and not _task.done()):
                 await start_health_test(trigger="scheduler")
         except asyncio.CancelledError:

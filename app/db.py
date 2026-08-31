@@ -312,7 +312,7 @@ def init_db() -> None:
             "upstream_user_agent": "ClashVergeRev/2.4 SubManager/3.0",
             "scheduler_concurrency": "3",
             "health_check_enabled": "1",
-            "health_check_interval_hours": "6",
+            "health_check_interval_minutes": "30",
             "health_check_concurrency": "5",
             "health_check_timeout_seconds": "8",
             "health_notify_enabled": "0",

@@ -73,7 +73,7 @@ class SettingsUpdate(BaseModel):
     upstream_user_agent: str = Field(max_length=200)
     scheduler_concurrency: int = Field(default=3, ge=1, le=10)
     health_check_enabled: bool = True
-    health_check_interval_hours: int = Field(default=6, ge=1, le=168)
+    health_check_interval_minutes: int = Field(default=30, ge=10, le=10080)
     health_check_concurrency: int = Field(default=5, ge=1, le=20)
     health_check_timeout_seconds: int = Field(default=8, ge=3, le=30)
     health_notify_enabled: bool = False

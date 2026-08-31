@@ -150,7 +150,7 @@ async function save() {
                 <el-switch v-model="form.health_check_enabled" />
               </div>
               <div class="form-grid">
-                <label>周期（小时）<el-input-number v-model="form.health_check_interval_hours" :min="1" :max="168" /></label>
+                <label>周期（分钟）<el-input-number v-model="form.health_check_interval_minutes" :min="10" :max="10080" /></label>
                 <label>并发数<el-input-number v-model="form.health_check_concurrency" :min="1" :max="20" /></label>
                 <label>超时（秒）<el-input-number v-model="form.health_check_timeout_seconds" :min="3" :max="30" /></label>
               </div>

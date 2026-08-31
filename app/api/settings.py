@@ -33,7 +33,8 @@ def settings_payload() -> dict[str, object]:
         "upstream_user_agent": get_setting("upstream_user_agent", "ClashVergeRev/2.4 SubManager/3.0"),
         "scheduler_concurrency": int(get_setting("scheduler_concurrency", "3")),
         "health_check_enabled": get_setting("health_check_enabled", "1") == "1",
-        "health_check_interval_hours": int(get_setting("health_check_interval_hours", "6")),
+        "health_check_interval_minutes": int(get_setting("health_check_interval_minutes")
+                                             or int(get_setting("health_check_interval_hours", "6")) * 60),
         "health_check_concurrency": int(get_setting("health_check_concurrency", "5")),
         "health_check_timeout_seconds": int(get_setting("health_check_timeout_seconds", "8")),
         "health_notify_enabled": get_setting("health_notify_enabled", "0") == "1",
@@ -83,7 +84,7 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
         "upstream_user_agent": payload.upstream_user_agent.strip() or "ClashVergeRev/2.4 SubManager/3.0",
         "scheduler_concurrency": str(payload.scheduler_concurrency),
         "health_check_enabled": "1" if payload.health_check_enabled else "0",
-        "health_check_interval_hours": str(payload.health_check_interval_hours),
+        "health_check_interval_minutes": str(payload.health_check_interval_minutes),
         "health_check_concurrency": str(payload.health_check_concurrency),
         "health_check_timeout_seconds": str(payload.health_check_timeout_seconds),
         "health_notify_enabled": "1" if payload.health_notify_enabled else "0",
