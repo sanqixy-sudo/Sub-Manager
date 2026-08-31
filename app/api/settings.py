@@ -36,6 +36,9 @@ def settings_payload() -> dict[str, object]:
         "health_check_interval_hours": int(get_setting("health_check_interval_hours", "6")),
         "health_check_concurrency": int(get_setting("health_check_concurrency", "5")),
         "health_check_timeout_seconds": int(get_setting("health_check_timeout_seconds", "8")),
+        "health_notify_enabled": get_setting("health_notify_enabled", "0") == "1",
+        "health_notify_webhook": get_setting("health_notify_webhook"),
+        "health_notify_threshold": int(get_setting("health_notify_threshold", "3")),
         "default_credentials": username == "admin" and default_valid, "listen_port": 7777, "data_dir": str(DATA_DIR),
     }
 
@@ -59,6 +62,8 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
         re.compile(payload.pseudo_node_filter)
     except re.error as exc:
         raise HTTPException(400, f"伪节点过滤正则无效: {exc}") from exc
+    if payload.health_notify_webhook.strip() and not re.match(r"^https?://", payload.health_notify_webhook.strip()):
+        raise HTTPException(400, "Webhook 地址必须以 http:// 或 https:// 开头")
     current_user = get_setting("admin_username", "admin")
     identity_changed = payload.admin_username.strip() != current_user or bool(payload.new_password)
     if identity_changed:
@@ -81,6 +86,9 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
         "health_check_interval_hours": str(payload.health_check_interval_hours),
         "health_check_concurrency": str(payload.health_check_concurrency),
         "health_check_timeout_seconds": str(payload.health_check_timeout_seconds),
+        "health_notify_enabled": "1" if payload.health_notify_enabled else "0",
+        "health_notify_webhook": payload.health_notify_webhook.strip(),
+        "health_notify_threshold": str(payload.health_notify_threshold),
     }
     if payload.new_password:
         values["admin_password_hash"] = hash_password(payload.new_password)

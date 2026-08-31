@@ -76,6 +76,9 @@ class SettingsUpdate(BaseModel):
     health_check_interval_hours: int = Field(default=6, ge=1, le=168)
     health_check_concurrency: int = Field(default=5, ge=1, le=20)
     health_check_timeout_seconds: int = Field(default=8, ge=3, le=30)
+    health_notify_enabled: bool = False
+    health_notify_webhook: str = Field(default="", max_length=500)
+    health_notify_threshold: int = Field(default=3, ge=1, le=20)
     admin_username: str = Field(min_length=1, max_length=64)
     current_password: str | None = Field(default=None, max_length=128)
     new_password: str | None = Field(default=None, min_length=8, max_length=128)

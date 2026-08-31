@@ -136,6 +136,8 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
             if tls in {"tls", "1", "true"}:
                 proxy["tls"] = True
                 if data.get("sni") or data.get("host"): proxy["servername"] = str(data.get("sni") or data.get("host"))
+            if "verify" in data and str(data.get("verify")).strip().lower() in {"", "0", "false", "no"}: proxy["skip-cert-verify"] = True
+            if str(data.get("allowInsecure") or "").strip().lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
             if network == "ws":
                 proxy["ws-opts"] = {"path": str(data.get("path") or "/"),
                                     "headers": {"Host": str(data.get("host"))} if data.get("host") else {}}
@@ -158,6 +160,8 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
                 if query.get("sni"): proxy["servername"] = query["sni"]
                 if query.get("fp"): proxy["client-fingerprint"] = query["fp"]
                 if query.get("flow"): proxy["flow"] = query["flow"]
+                if query.get("insecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
+                if query.get("allowinsecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
                 if security == "reality":
                     proxy["reality-opts"] = {"public-key": query.get("pbk", ""), "short-id": query.get("sid", "")}
                 if network == "ws":
@@ -168,6 +172,14 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
             else:
                 if query.get("sni"): proxy["sni"] = query["sni"]
                 if query.get("insecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
+                if type_name == "hysteria2":
+                    if query.get("obfs"): proxy["obfs"] = query["obfs"]
+                    if query.get("obfs-password"): proxy["obfs-password"] = query["obfs-password"]
+                    if query.get("alpn"): proxy["alpn"] = [x for x in query["alpn"].split(",") if x]
+                if type_name == "tuic":
+                    congestion = query.get("congestion_controller") or query.get("congestion-controller")
+                    if congestion: proxy["congestion-controller"] = congestion
+                    if query.get("alpn"): proxy["alpn"] = [x for x in query["alpn"].split(",") if x]
             return proxy
         if scheme == "ss":
             if not parsed.hostname or not parsed.port: return None

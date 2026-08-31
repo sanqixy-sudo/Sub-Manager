@@ -2,12 +2,13 @@
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { AlertTriangle, ArrowLeft, Check, Copy, Edit3, FolderTree, GripVertical, RefreshCw, Workflow } from 'lucide-vue-next'
+import { AlertTriangle, ArrowLeft, Check, Copy, Download, Edit3, FolderTree, GripVertical, QrCode, RefreshCw, Workflow } from 'lucide-vue-next'
 import { api } from '../api'
-import { copyText, dt, duration, size } from '../utils'
+import { copyText, dt, duration, importSchemes, openImportScheme, size, supportsImport } from '../utils'
 import { useAppStore } from '../stores/app'
 import type { Group, NodeSnapshot, OutputStatus, RefreshRun } from '../types'
 import StatusTag from '../components/StatusTag.vue'
+import QrDialog from '../components/QrDialog.vue'
 
 const NODE_PAGE_SIZE = 50
 
@@ -28,8 +29,11 @@ const ordering = ref(false)
 const orderSaving = ref(false)
 const nodeSearch = ref('')
 const nodeProtocol = ref('')
+const nodeStatus = ref<'all' | 'pending' | 'confirmed'>('all')
 const nodePage = ref(1)
 const dragIndex = ref<number | null>(null)
+const orderSearch = ref('')
+const orderDropIndex = ref<number | null>(null)
 const loaded = new Set<string>()
 
 const enabledUpstreams = computed(() => group.value?.upstreams.filter(x => x.enabled) || [])
@@ -40,11 +44,23 @@ const ipWhitelistSummary = computed(() => {
   return count ? `已启用（${count} 条）` : '未启用'
 })
 const nodeProtocols = computed(() => [...new Set(nodes.value.map(x => x.protocol))])
+const confirmedCount = computed(() => nodes.value.length - pendingNodes.value.length)
 const filteredNodes = computed(() =>
   nodes.value
+    .filter(x => nodeStatus.value === 'all' || (nodeStatus.value === 'confirmed' ? x.confirmation_status === 'confirmed' : x.confirmation_status !== 'confirmed'))
     .filter(x => !nodeSearch.value || `${x.final_name} ${x.original_name} ${x.alias || ''}`.toLowerCase().includes(nodeSearch.value.toLowerCase()))
     .filter(x => !nodeProtocol.value || x.protocol === nodeProtocol.value))
 const pagedNodes = computed(() => filteredNodes.value.slice((nodePage.value - 1) * NODE_PAGE_SIZE, nodePage.value * NODE_PAGE_SIZE))
+// 排序模式的搜索定位：只影响显示，不改变底层 nodes 顺序
+const orderingData = computed(() => {
+  if (!orderSearch.value) return nodes.value
+  const q = orderSearch.value.toLowerCase()
+  return nodes.value.filter(x => `${x.final_name} ${x.original_name} ${x.alias || ''}`.toLowerCase().includes(q))
+})
+/** 排序表格中的行 → nodes 数组中的真实下标（搜索过滤后 $index 会失真） */
+function realIndex(row: NodeSnapshot) {
+  return nodes.value.indexOf(row)
+}
 
 async function loadGroup(initial = false) {
   if (initial) loading.value = true
@@ -136,18 +152,85 @@ function pinNode(index: number) {
   nodes.value = copy
 }
 
-/** 原生 HTML5 拖拽排序：dragstart 记录源索引，drop 到目标行后移动 */
+/** 原生 HTML5 拖拽排序：dragstart 记录源索引，drop 到目标行后移动；搜索定位时禁用拖拽 */
 function onDragStart(index: number) {
+  if (orderSearch.value) return
   dragIndex.value = index
 }
 
+function onDragOver(index: number) {
+  if (dragIndex.value == null) return
+  orderDropIndex.value = index
+}
+
 function onDrop(index: number) {
+  orderDropIndex.value = null
+  if (orderSearch.value) return
   if (dragIndex.value == null || dragIndex.value === index) return
   const copy = nodes.value.slice()
   const item = copy.splice(dragIndex.value, 1)[0]
   copy.splice(index, 0, item)
   nodes.value = copy
   dragIndex.value = null
+}
+
+/** 排序模式行反馈：拖拽源行与 dragover 目标行高亮（el-table 无法整行 drop，用 row-class-name 做视觉反馈） */
+function orderRowClass({ row }: { row: NodeSnapshot }) {
+  if (!ordering.value) return ''
+  const i = realIndex(row)
+  if (orderDropIndex.value === i) return 'order-drop-target'
+  if (dragIndex.value === i) return 'order-dragging'
+  return ''
+}
+
+/** 输入目标序号，直接把节点移动到该位置 */
+async function moveNodeTo(index: number) {
+  try {
+    const { value } = await ElMessageBox.prompt(`输入目标序号（1 - ${nodes.value.length}），节点将移动到该位置。`, '移动到指定位置', {
+      inputValue: String(index + 1),
+      inputValidator: (v: string) => {
+        const n = Number(v)
+        return (Number.isInteger(n) && n >= 1 && n <= nodes.value.length) || `请输入 1 - ${nodes.value.length} 之间的整数`
+      },
+      confirmButtonText: '移动',
+      cancelButtonText: '取消',
+    })
+    const target = Number(value) - 1
+    if (target === index) return
+    const copy = nodes.value.slice()
+    const item = copy.splice(index, 1)[0]
+    copy.splice(target, 0, item)
+    nodes.value = copy
+  } catch (e: any) {
+    if (e === 'cancel' || e === 'close') return // 用户取消，静默
+    ElMessage.error(e?.message || '操作失败')
+  }
+}
+
+type SmartOrder = 'latency' | 'name' | 'source'
+
+/** 一键智能重排：仅改本地 nodes，仍需点保存生效 */
+async function smartReorder(kind: SmartOrder) {
+  const names: Record<SmartOrder, string> = {
+    latency: '按测活延迟升序（未测试沉底）',
+    name: '按名称',
+    source: '按来源',
+  }
+  try {
+    await ElMessageBox.confirm(`将${names[kind]}重排全部节点，覆盖当前手动顺序（点击保存后生效）。确认继续？`, '智能重排', { type: 'warning' })
+  } catch {
+    return // 用户取消，静默
+  }
+  const copy = nodes.value.slice()
+  if (kind === 'latency') {
+    copy.sort((a, b) => (a.connectivity_latency_ms ?? Number.MAX_SAFE_INTEGER) - (b.connectivity_latency_ms ?? Number.MAX_SAFE_INTEGER))
+  } else if (kind === 'name') {
+    copy.sort((a, b) => a.final_name.localeCompare(b.final_name, 'zh-Hans-CN'))
+  } else {
+    copy.sort((a, b) => a.source_name.localeCompare(b.source_name, 'zh-Hans-CN') || a.final_name.localeCompare(b.final_name, 'zh-Hans-CN'))
+  }
+  nodes.value = copy
+  ElMessage.success('已重排，确认无误后点击「保存顺序」')
 }
 
 async function saveNodeOrder() {
@@ -193,13 +276,44 @@ async function copy(v?: string) {
   ElMessage.success('订阅地址已复制')
 }
 
+/** 一键导入：尝试唤起客户端 scheme，800ms 后页面仍可见说明未唤起，复制地址兜底 */
+async function importOutput(o: OutputStatus) {
+  if (!o.url) return
+  const [item] = importSchemes(o.client_type, o.url)
+  if (!item) return
+  const opened = await openImportScheme(item.scheme)
+  if (!opened) {
+    await copyText(o.url)
+    ElMessage.warning('未检测到客户端，地址已复制，可手动粘贴')
+  }
+}
+
+/** 扫码导入：输出卡地址生成二维码弹层（不限 client_type，扫码后客户端手动粘贴也成立） */
+const qrVisible = ref(false)
+const qrTarget = ref<{ title: string; url: string } | null>(null)
+
+function openQrCode(o: OutputStatus) {
+  if (!o.url) return
+  qrTarget.value = { title: o.name, url: o.url }
+  qrVisible.value = true
+}
+
 watch(tab, name => {
   loadTab(name)
   if (route.query.tab !== name) router.replace({ query: { ...route.query, tab: name } }).catch(() => {})
 })
 
-watch([nodeSearch, nodeProtocol], () => {
+watch([nodeSearch, nodeProtocol, nodeStatus], () => {
   nodePage.value = 1
+})
+
+// 退出排序模式时清空搜索定位与拖拽状态
+watch(ordering, v => {
+  if (!v) {
+    orderSearch.value = ''
+    dragIndex.value = null
+    orderDropIndex.value = null
+  }
 })
 
 // 同组件切换到其他组 id 时，重置缓存并重新加载
@@ -213,11 +327,14 @@ watch(() => route.params.id, async nv => {
   outputs.value = []
   runs.value = []
   ordering.value = false
+  orderSearch.value = ''
   nodePage.value = 1
   await Promise.all([loadGroup(true), loadTab(tab.value, true)])
 })
 
 onMounted(async () => {
+  // 测活页「管理」跳转带 search 参数时，用它初始化节点搜索（仅初始化一次，不回写 URL）
+  if (typeof route.query.search === 'string' && route.query.search) nodeSearch.value = route.query.search
   await Promise.all([loadGroup(true), app.settings ? Promise.resolve() : app.bootstrap()])
   if (tab.value !== 'overview') loadTab(tab.value)
 })
@@ -372,32 +489,73 @@ onMounted(async () => {
               <el-select v-model="nodeProtocol" placeholder="全部协议" clearable>
                 <el-option v-for="p in nodeProtocols" :key="p" :label="p.toUpperCase()" :value="p" />
               </el-select>
+              <div class="node-status-chips">
+                <button :class="{ active: nodeStatus === 'all' }" @click="nodeStatus = 'all'">全部 {{ nodes.length }}</button>
+                <button :class="{ active: nodeStatus === 'pending' }" @click="nodeStatus = 'pending'">待确认 {{ pendingNodes.length }}</button>
+                <button :class="{ active: nodeStatus === 'confirmed' }" @click="nodeStatus = 'confirmed'">已确认 {{ confirmedCount }}</button>
+              </div>
               <span class="muted">匹配 {{ filteredNodes.length }} 条</span>
             </div>
-            <p v-if="ordering" class="ordering-tip">拖动左侧手柄，或使用上移 / 下移 / 置顶调整顺序，完成后记得保存。</p>
-            <el-table :data="ordering ? nodes : pagedNodes" empty-text="刷新成功后将在此生成脱敏节点快照">
-              <el-table-column v-if="ordering" label="调整" width="220">
-                <template #default="{ $index }">
-                  <div class="node-reorder-cell" @dragover.prevent @drop="onDrop($index)">
-                    <span class="drag-handle" draggable="true" title="拖拽调整顺序" @dragstart="onDragStart($index)" @dragend="dragIndex = null">
+            <template v-if="ordering">
+              <div class="ordering-bar">
+                <el-input v-model="orderSearch" placeholder="搜索节点名称，快速定位" clearable />
+                <el-dropdown trigger="click" @command="smartReorder">
+                  <el-button plain>智能重排</el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="latency">按测活延迟升序（未测试沉底）</el-dropdown-item>
+                      <el-dropdown-item command="name">按名称</el-dropdown-item>
+                      <el-dropdown-item command="source">按来源</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
+                <span class="muted">显示 {{ orderingData.length }} / {{ nodes.length }} 条</span>
+              </div>
+              <p class="ordering-tip">{{ orderSearch ? '搜索定位时不能拖拽，可使用置顶 / 上移 / 下移 / 移动到调整顺序。' : '拖动左侧手柄，或使用置顶 / 上移 / 下移 / 移动到调整顺序，完成后记得保存。' }}</p>
+            </template>
+            <el-table
+              :data="ordering ? orderingData : pagedNodes"
+              :max-height="ordering ? 620 : undefined"
+              :row-class-name="orderRowClass"
+              empty-text="刷新成功后将在此生成脱敏节点快照"
+            >
+              <el-table-column v-if="ordering" label="调整" width="300">
+                <template #default="{ row }">
+                  <div class="node-reorder-cell" @dragover.prevent="onDragOver(realIndex(row))" @drop="onDrop(realIndex(row))">
+                    <span
+                      class="drag-handle"
+                      :class="{ disabled: !!orderSearch }"
+                      :draggable="!orderSearch"
+                      :title="orderSearch ? '搜索时不能拖拽' : '拖拽调整顺序'"
+                      @dragstart="onDragStart(realIndex(row))"
+                      @dragend="dragIndex = null; orderDropIndex = null"
+                    >
                       <GripVertical />
                     </span>
-                    <el-button link :disabled="$index === 0" @click="pinNode($index)">置顶</el-button>
-                    <el-button link :disabled="$index === 0" @click="moveNode($index, -1)">上移</el-button>
-                    <el-button link :disabled="$index === nodes.length - 1" @click="moveNode($index, 1)">下移</el-button>
+                    <el-button link :disabled="realIndex(row) === 0" @click="pinNode(realIndex(row))">置顶</el-button>
+                    <el-button link :disabled="realIndex(row) === 0" @click="moveNode(realIndex(row), -1)">上移</el-button>
+                    <el-button link :disabled="realIndex(row) === nodes.length - 1" @click="moveNode(realIndex(row), 1)">下移</el-button>
+                    <el-button link @click="moveNodeTo(realIndex(row))">移动到</el-button>
                   </div>
                 </template>
               </el-table-column>
               <el-table-column label="#" width="52">
-                <template #default="{ $index }">{{ ordering ? $index + 1 : (nodePage - 1) * NODE_PAGE_SIZE + $index + 1 }}</template>
+                <template #default="{ $index, row }">{{ ordering ? realIndex(row) + 1 : (nodePage - 1) * NODE_PAGE_SIZE + $index + 1 }}</template>
               </el-table-column>
               <el-table-column prop="source_name" label="来源" width="125" show-overflow-tooltip />
-              <el-table-column prop="original_name" label="原名" min-width="190" show-overflow-tooltip />
-              <el-table-column prop="rule_name" label="规则结果" min-width="180" show-overflow-tooltip />
+              <el-table-column prop="original_name" label="原名" min-width="190" show-overflow-tooltip class-name="hide-narrow" label-class-name="hide-narrow" />
+              <el-table-column prop="rule_name" label="规则结果" min-width="180" show-overflow-tooltip class-name="hide-narrow" label-class-name="hide-narrow" />
               <el-table-column prop="alias" label="自定义名称" min-width="150">
                 <template #default="{ row }">{{ row.alias || '—' }}</template>
               </el-table-column>
-              <el-table-column prop="final_name" label="最终下游名称" min-width="200" show-overflow-tooltip />
+              <el-table-column label="最终下游名称" min-width="200">
+                <template #default="{ row }">
+                  <div class="final-name-cell">
+                    <span>{{ row.final_name }}</span>
+                    <small>原名：{{ row.original_name }}</small>
+                  </div>
+                </template>
+              </el-table-column>
               <el-table-column label="测活" width="110">
                 <template #default="{ row }">
                   <span class="node-state" :class="row.health_status">{{ row.health_status === 'healthy' ? (row.connectivity_latency_ms ? row.connectivity_latency_ms + ' ms' : '正常') : row.health_status === 'unavailable' ? '不可用' : row.health_status === 'google_blocked' ? 'Google 不通' : '未测试' }}</span>
@@ -443,7 +601,11 @@ onMounted(async () => {
                 <span>渲染器<b>{{ o.renderer || '—' }}</b></span>
                 <span>跳过节点<b>{{ o.skipped_nodes }}</b></span>
               </div>
-              <el-button :disabled="!o.url" @click="copy(o.url)"><Copy />复制固定地址</el-button>
+              <div class="output-actions">
+                <el-button :disabled="!o.url" @click="copy(o.url)"><Copy />复制固定地址</el-button>
+                <el-button v-if="supportsImport(o.client_type)" :disabled="!o.url" @click="importOutput(o)"><Download />导入</el-button>
+                <el-button :disabled="!o.url" @click="openQrCode(o)"><QrCode />二维码</el-button>
+              </div>
             </article>
           </div>
         </el-tab-pane>
@@ -482,5 +644,6 @@ onMounted(async () => {
         </el-tab-pane>
       </el-tabs>
     </template>
+    <QrDialog v-model="qrVisible" :title="qrTarget?.title || ''" :url="qrTarget?.url || ''" />
   </section>
 </template>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted } from 'vue'
+import { computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   LayoutDashboard,
@@ -24,6 +24,54 @@ onMounted(async () => {
   await store.checkSession()
   if (store.authenticated) await store.bootstrap()
 })
+
+// P2 全局快捷键：/ 聚焦当前页第一个搜索框，r 点击页头刷新按钮
+// 守卫：输入类控件聚焦中、有弹层（dialog/drawer 等 .el-overlay）打开时不触发
+function isEditableTarget(target: EventTarget | null) {
+  const el = target as HTMLElement | null
+  if (!el || !el.tagName) return false
+  const tag = el.tagName.toLowerCase()
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || el.isContentEditable
+}
+
+function onGlobalKeydown(e: KeyboardEvent) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return
+  if (isEditableTarget(e.target)) return
+  if (document.querySelector('.el-overlay')) return
+  if (e.key === '/') {
+    const input = document.querySelector<HTMLElement>(
+      'main .el-input__inner[placeholder*="搜索"], main input[placeholder*="搜索"]',
+    )
+    if (input) {
+      e.preventDefault()
+      input.focus()
+    }
+    return
+  }
+  if (e.key === 'r') {
+    const buttons = document.querySelectorAll<HTMLButtonElement>('main .page-head .el-button')
+    for (const button of buttons) {
+      // lucide 0.468 渲染的类名带 Icon 后缀（lucide-refresh-cw-icon），用前缀包含匹配
+      if (!button.querySelector('svg[class*="lucide-refresh-cw"]')) continue
+      if (button.disabled || button.classList.contains('is-disabled')) continue
+      e.preventDefault()
+      button.click()
+      return
+    }
+  }
+}
+
+// 仅登录后注册快捷键监听，登出即移除
+watch(
+  () => store.authenticated,
+  (authed) => {
+    window.removeEventListener('keydown', onGlobalKeydown)
+    if (authed) window.addEventListener('keydown', onGlobalKeydown)
+  },
+  { immediate: true },
+)
+
+onUnmounted(() => window.removeEventListener('keydown', onGlobalKeydown))
 
 async function logout() {
   await store.logout()

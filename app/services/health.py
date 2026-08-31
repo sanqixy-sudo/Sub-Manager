@@ -128,13 +128,29 @@ def _cleanup_history() -> None:
         conn.commit()
 
 
-def _store_result(run_id: int, sub_id: int, node: NormalizedNode, result: dict[str, Any]) -> None:
+_AVAILABLE_STATUSES = {"healthy", "google_blocked", "connectivity_target_failed"}
+
+
+def _notify_event(status: str, failures: int, prev_failures: int, threshold: int) -> str | None:
+    """连续失败达到阈值时告警一次（仅越线当次），之后恢复时再通知一次。"""
+    if threshold <= 0:
+        return None
+    if status == "unavailable" and failures == threshold:
+        return "down"
+    if status in _AVAILABLE_STATUSES and prev_failures >= threshold:
+        return "recovered"
+    return None
+
+
+def _store_result(run_id: int, sub_id: int, node: NormalizedNode, result: dict[str, Any],
+                  notify_threshold: int = 0) -> tuple[str, int] | None:
     now = utcnow_iso()
     status = str(result["status"])
     with db() as conn:
         old = conn.execute("SELECT consecutive_failures FROM node_health_latest WHERE subscription_id=? AND node_key=?",
                            (sub_id, node.node_key)).fetchone()
-        failures = (int(old[0]) + 1 if old else 1) if status == "unavailable" else 0
+        prev_failures = int(old[0]) if old else 0
+        failures = (prev_failures + 1 if old else 1) if status == "unavailable" else 0
         values = (int(result["connectivity_ok"]) if result.get("connectivity_ok") is not None else None,
                   result.get("connectivity_latency_ms"),
                   int(result["google_ok"]) if result.get("google_ok") is not None else None,
@@ -158,23 +174,71 @@ def _store_result(run_id: int, sub_id: int, node: NormalizedNode, result: dict[s
                 (sub_id, node.node_key, status, *values, failures, result.get("error_code"), now),
             )
         conn.execute("UPDATE health_check_runs SET completed=completed+1,available=available+?,unavailable=unavailable+?,skipped=skipped+? WHERE id=?",
-                     (int(status in {"healthy", "google_blocked", "connectivity_target_failed"}),
+                     (int(status in _AVAILABLE_STATUSES),
                       int(status == "unavailable"), int(status == "skipped"), run_id))
         conn.commit()
+    if status == "skipped":
+        return None
+    kind = _notify_event(status, failures, prev_failures, notify_threshold)
+    return (kind, failures) if kind else None
+
+
+async def _send_notification(events: list[tuple[str, str, str, int]]) -> None:
+    """把测活告警推送到 Webhook，消息体兼容企业微信/钉钉机器人 text 格式。"""
+    webhook = get_setting("health_notify_webhook").strip()
+    if not webhook:
+        return
+    lines = [f"[Sub Manager] 节点测活通知（{len(events)} 条）"]
+    for kind, group, name, failures in events[:20]:
+        lines.append(f"√ {group} / {name} 已恢复" if kind == "recovered"
+                     else f"× {group} / {name} 连续失败 {failures} 次")
+    if len(events) > 20:
+        lines.append(f"… 其余 {len(events) - 20} 条省略")
+    try:
+        async with httpx.AsyncClient(timeout=8) as client:
+            await client.post(webhook, json={"msgtype": "text", "text": {"content": "\n".join(lines)}})
+    except httpx.HTTPError:
+        pass
+
+
+_ERROR_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("timeout", ("timeout", "deadline")),
+    ("refused", ("refused",)),
+    ("reset", ("reset",)),
+    ("dns", ("dns", "no such host", "resolve")),
+    ("tls", ("tls", "certificate", "handshake")),
+    ("auth", ("auth", "unauthorized", "407")),
+)
+
+
+def _classify_error(message: str) -> str:
+    """Map a raw error message to a coarse category; never returns the raw text
+    (it may contain node addresses and must not reach the database)."""
+    text = message.lower()
+    for kind, needles in _ERROR_KINDS:
+        if any(needle in text for needle in needles):
+            return kind
+    return "other"
 
 
 async def _delay(client: httpx.AsyncClient, base: str, headers: dict[str, str], name: str,
-                 url: str, timeout_s: int, semaphore: asyncio.Semaphore) -> tuple[bool, int | None]:
+                 url: str, timeout_s: int, semaphore: asyncio.Semaphore) -> tuple[bool, int | None, str | None]:
     async with semaphore:
         try:
             response = await client.get(f"{base}/proxies/{quote(name, safe='')}/delay", headers=headers,
                                         params={"url": url, "timeout": timeout_s * 1000},
                                         timeout=timeout_s + 2)
             if response.status_code == 200:
-                return True, int(response.json().get("delay", 0)) or None
-        except (httpx.HTTPError, ValueError, TypeError):
-            pass
-        return False, None
+                return True, int(response.json().get("delay", 0)) or None, None
+            try:
+                message = str(response.json().get("message") or "")
+            except (ValueError, TypeError, AttributeError):
+                message = response.text[:200]
+            return False, None, _classify_error(message)
+        except httpx.TimeoutException:
+            return False, None, "timeout"
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            return False, None, _classify_error(str(exc))
 
 
 async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -> None:
@@ -187,6 +251,10 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
             conn.execute("UPDATE health_check_runs SET total=? WHERE id=?", (len(selected), run_id))
             conn.commit()
         supported = [(sub_id, node) for sub_id, node in selected if node.proxy is not None]
+        notify_threshold = (int(get_setting("health_notify_threshold", "3"))
+                            if get_setting("health_notify_enabled", "0") == "1" else 0)
+        group_names = {int(x["id"]): str(x["name"]) for x in list_subscriptions()}
+        events: list[tuple[str, str, str, int]] = []
         for sub_id, node in selected:
             if node.proxy is None:
                 _store_result(run_id, sub_id, node, {"status": "skipped", "error_code": "unsupported_protocol"})
@@ -205,7 +273,10 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
                 proxies.append(proxy)
                 internal_names[(sub_id, node.node_key)] = name
             config = {"external-controller": f"127.0.0.1:{port}", "secret": secret,
-                      "log-level": "silent", "mode": "direct", "proxies": proxies}
+                      "log-level": "silent", "mode": "direct",
+                      "dns": {"enable": True, "nameserver": ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"],
+                              "fallback-filter": {"geoip": False}},
+                      "proxies": proxies}
             path = temp_dir / "config.yaml"
             path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), "utf-8")
             os.chmod(path, 0o600)
@@ -223,18 +294,35 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
                         _delay(client, base, headers, name, HEALTH_CONNECTIVITY_URL, timeout_s, semaphore),
                         _delay(client, base, headers, name, HEALTH_GOOGLE_URL, timeout_s, semaphore),
                     )
-                    cf_ok, cf_delay = cloudflare
-                    google_ok, google_delay = google
+                    if not cloudflare[0] and not google[0]:
+                        # 双目标首轮全失败多为冷启动握手抖动，隔 0.5s 重试一次，以重试结果为准
+                        await asyncio.sleep(0.5)
+                        cloudflare, google = await asyncio.gather(
+                            _delay(client, base, headers, name, HEALTH_CONNECTIVITY_URL, timeout_s, semaphore),
+                            _delay(client, base, headers, name, HEALTH_GOOGLE_URL, timeout_s, semaphore),
+                        )
+                    cf_ok, cf_delay, cf_err = cloudflare
+                    google_ok, google_delay, google_err = google
                     status = "healthy" if cf_ok and google_ok else (
                         "google_blocked" if cf_ok else ("connectivity_target_failed" if google_ok else "unavailable"))
-                    _store_result(run_id, sub_id, node, {"status": status, "connectivity_ok": cf_ok,
+                    error_code: str | None = None
+                    if not cf_ok and not google_ok:
+                        error_code = f"cf:{cf_err or 'other'},google:{google_err or 'other'}"
+                    elif not google_ok:
+                        error_code = f"google:{google_err or 'other'}"
+                    elif not cf_ok:
+                        error_code = f"cf:{cf_err or 'other'}"
+                    event = _store_result(run_id, sub_id, node, {"status": status, "connectivity_ok": cf_ok,
                                   "connectivity_latency_ms": cf_delay, "google_ok": google_ok,
-                                  "google_latency_ms": google_delay,
-                                  "error_code": None if cf_ok or google_ok else "both_targets_failed"})
+                                  "google_latency_ms": google_delay, "error_code": error_code}, notify_threshold)
+                    if event:
+                        events.append((event[0], group_names.get(sub_id, ""), node.name, event[1]))
                 await asyncio.gather(*(test_one(sub_id, node) for sub_id, node in supported))
         with db() as conn:
             conn.execute("UPDATE health_check_runs SET status='completed',finished_at=? WHERE id=?", (utcnow_iso(), run_id))
             conn.commit()
+        if events:
+            await _send_notification(events)
     except asyncio.CancelledError:
         with db() as conn:
             conn.execute("UPDATE health_check_runs SET status='interrupted',finished_at=?,error_code='interrupted' WHERE id=?",

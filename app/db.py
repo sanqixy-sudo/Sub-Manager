@@ -315,6 +315,9 @@ def init_db() -> None:
             "health_check_interval_hours": "6",
             "health_check_concurrency": "5",
             "health_check_timeout_seconds": "8",
+            "health_notify_enabled": "0",
+            "health_notify_webhook": "",
+            "health_notify_threshold": "3",
         }
         for key, value in defaults.items():
             conn.execute(

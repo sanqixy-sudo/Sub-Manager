@@ -3151,6 +3151,10 @@ main {
     font-size: var(--fs-xs);
   }
 
+  .health-cards {
+    grid-template-columns: 1fr;
+  }
+
   .health-blocks i,
   .history-dots i {
     width: 7px;
@@ -3432,4 +3436,708 @@ main {
 
 .tool-error {
   margin-top: var(--space-4);
+}
+
+/* ============================================================
+   阶段五：测活展示与排序体验
+   延迟质量着色 / 可用率副行 / 当前页排序提示 / 历史色块升级
+   排序模式行反馈与工具栏 / 分类拖拽与「已选 + 候选」双区
+   ============================================================ */
+
+/* 延迟按质量着色：<300ms 绿 / <800ms 黄 / ≥800ms 红 / 无值灰 */
+.lat-good {
+  color: var(--green);
+}
+
+.lat-mid {
+  color: var(--amber);
+}
+
+.lat-bad {
+  color: var(--red);
+}
+
+.lat-none {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 抽屉概要行内的延迟着色（覆盖 .health-detail-summary b 的默认色） */
+.health-detail-summary b.lat-good {
+  color: var(--green);
+}
+
+.health-detail-summary b.lat-mid {
+  color: var(--amber);
+}
+
+.health-detail-summary b.lat-bad {
+  color: var(--red);
+}
+
+.health-detail-summary b.lat-none {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+/* 统计卡可用率副行（≥90% 绿 / ≥60% 黄 / 否则红） */
+.stat-pct {
+  font-style: normal;
+  margin-left: var(--space-2);
+  font-weight: 700;
+}
+
+.stat-pct.pct-good {
+  color: var(--green);
+}
+
+.stat-pct.pct-mid {
+  color: var(--amber);
+}
+
+.stat-pct.pct-bad {
+  color: var(--red);
+}
+
+/* 服务端分页下的列排序提示 */
+.health-sort-hint {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) 0;
+  text-align: right;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/* 移动端表格横向滚动容器 */
+.health-table-scroll {
+  overflow-x: auto;
+}
+
+/* 历史测活色块：el-tooltip 触发器保持行内布局，失败/不可用更高且带条纹 */
+.health-blocks .el-tooltip__trigger {
+  display: inline-flex;
+}
+
+.health-blocks i.red {
+  height: 22px;
+  background: repeating-linear-gradient(135deg, var(--red) 0 3px, #f0a4ab 3px 5px);
+}
+
+/* 色块按延迟着色（与 latencyClass 阈值一致） */
+.health-blocks i.lat-good {
+  background: var(--green);
+}
+
+.health-blocks i.lat-mid {
+  background: var(--amber);
+}
+
+.health-blocks i.lat-bad {
+  background: var(--red);
+}
+
+.health-blocks i.gray {
+  background: #d3d9e4;
+}
+
+/* 测活色块图例 */
+.health-legend {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 10px 14px 0;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.health-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.health-legend i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+
+.health-legend i.lat-good {
+  background: var(--green);
+}
+
+.health-legend i.lat-mid {
+  background: var(--amber);
+}
+
+.health-legend i.lat-bad,
+.health-legend i.red {
+  background: var(--red);
+}
+
+.health-legend i.gray {
+  background: #d3d9e4;
+}
+
+/* 节点测活卡片网格 */
+.health-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 12px;
+  padding: 14px;
+}
+
+.health-card {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  cursor: pointer;
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.health-card:hover {
+  box-shadow: 0 6px 18px rgba(30, 41, 59, 0.12);
+  transform: translateY(-1px);
+}
+
+.health-card.selected {
+  outline: 2px solid var(--primary);
+  outline-offset: -2px;
+}
+
+.health-card header {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.health-card header .health-node {
+  flex: 1;
+  min-width: 0;
+}
+
+.health-card header .health-status {
+  flex: none;
+}
+
+.health-card-latency {
+  display: flex;
+  gap: 18px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.health-card-latency b {
+  margin-left: 4px;
+}
+
+.health-card-blocks {
+  flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px dashed var(--line);
+}
+
+/* 卡片内固定 48 格色块条，自适应铺满整行 */
+.health-card-blocks i {
+  flex: 1 1 0;
+  min-width: 3px;
+}
+
+.health-sort-select {
+  width: 140px;
+}
+
+.health-card footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.health-cards-empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
+
+/* 组详情排序模式：搜索定位工具栏 */
+.ordering-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  margin-bottom: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.ordering-bar .el-input {
+  max-width: 280px;
+}
+
+.ordering-bar .muted {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+/* 排序模式行反馈：拖拽源行弱化、dragover 目标行高亮（el-table 无法整行 drop，用 row-class-name 实现） */
+.el-table tr.order-dragging td {
+  opacity: 0.55;
+}
+
+.el-table tr.order-drop-target td {
+  background: var(--primary-soft) !important;
+  box-shadow: inset 0 2px 0 var(--primary);
+}
+
+/* 搜索定位时拖拽手柄禁用态 */
+.drag-handle.disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.drag-handle.disabled:hover {
+  background: transparent;
+  color: var(--muted);
+}
+
+/* 分类列表：拖拽落点高亮 */
+.category-list article.drop-target {
+  outline: 2px dashed var(--primary);
+  outline-offset: -2px;
+}
+
+/* 分类管理「已选节点」区 */
+.cat-selected-list {
+  display: grid;
+  gap: var(--space-2);
+  max-height: 340px;
+  overflow: auto;
+}
+
+.cat-selected-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 10px var(--space-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--green);
+  border-radius: var(--r-md);
+}
+
+.cat-selected-row > span {
+  display: grid;
+  min-width: 0;
+  flex: 1;
+}
+
+.cat-selected-row b {
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cat-selected-row small {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.cat-empty {
+  margin: 0;
+  padding: var(--space-4);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--r-md);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  text-align: center;
+}
+
+/* 候选区：已勾选行高亮 + 「已加入」标记 */
+.category-nodes > label.joined {
+  border-color: var(--green);
+  background: var(--green-soft);
+}
+
+.joined-badge {
+  font-style: normal;
+  margin-left: auto;
+  flex: none;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--green);
+}
+
+.candidate-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: var(--space-3);
+}
+
+@media (max-width: 760px) {
+  .health-table-scroll .el-table {
+    min-width: 960px;
+  }
+
+  .health-blocks i.red {
+    height: 17px;
+  }
+
+  .ordering-bar .el-input {
+    max-width: none;
+    width: 100%;
+  }
+
+  .candidate-pagination {
+    justify-content: center;
+  }
+}
+
+/* ============================================================
+   P0：核心体验闭环
+   新手空状态引导 / 一键导入入口 / 测活联动管理 / 列表分页与全部刷新
+   ============================================================ */
+
+/* 订阅组新手引导卡（无订阅组时替代空表格） */
+.onboard-panel {
+  display: grid;
+  justify-items: center;
+  text-align: center;
+  gap: var(--space-3);
+  padding: var(--space-8) var(--space-6);
+}
+
+.onboard-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border-radius: var(--r-lg);
+  background: var(--primary-soft);
+  color: var(--primary);
+}
+
+.onboard-icon svg {
+  width: 26px;
+}
+
+.onboard-panel h2 {
+  margin: 0;
+  font-size: var(--fs-2xl);
+  color: var(--text);
+}
+
+.onboard-sub {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--muted);
+}
+
+.onboard-steps {
+  list-style: none;
+  margin: var(--space-3) 0 0;
+  padding: 0;
+  display: grid;
+  gap: var(--space-3);
+  max-width: 460px;
+  width: 100%;
+  text-align: left;
+}
+
+.onboard-steps li {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+
+.onboard-steps i {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+  color: #fff;
+  font-size: var(--fs-xs);
+  font-style: normal;
+  font-weight: 700;
+}
+
+.onboard-steps b {
+  display: block;
+  font-size: var(--fs-md);
+  color: var(--text);
+}
+
+.onboard-steps span {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.onboard-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
+}
+
+.onboard-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+/* 概览「需要关注」面板的新手引导空态 */
+.onboard-compact svg {
+  color: var(--primary);
+}
+
+.onboard-compact .el-button {
+  margin-top: var(--space-2);
+}
+
+/* 订阅组列表分页 */
+.group-pagination {
+  display: flex;
+  justify-content: flex-end;
+  padding: var(--space-3) var(--space-4) var(--space-4);
+}
+
+/* 组详情输出卡操作按钮组（复制 + 导入） */
+.output-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+}
+
+.output-actions .el-button + .el-button {
+  margin-left: 0;
+}
+
+@media (max-width: 760px) {
+  .onboard-panel {
+    padding: var(--space-6) var(--space-4);
+  }
+
+  .group-pagination {
+    justify-content: center;
+  }
+}
+
+/* ============================================================
+   P1：信息呈现与效率
+   测活抽屉趋势图 / 历史色块共享浮层 / 编辑页可点击步骤条 / 节点表减负
+   ============================================================ */
+
+/* 抽屉迷你趋势图：近 30 条测活记录，条高按 Cloudflare 延迟归一化 */
+.health-trend {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 64px;
+  margin: var(--space-2) 0 var(--space-3);
+  padding-bottom: 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.health-trend i {
+  flex: 1 1 0;
+  min-width: 3px;
+  border-radius: 2px 2px 0 0;
+  background: #d3d9e4;
+}
+
+.health-trend i.green {
+  background: var(--green);
+}
+
+.health-trend i.yellow {
+  background: var(--amber);
+}
+
+.health-trend i.blue {
+  background: var(--primary);
+}
+
+.health-trend i.red {
+  background: repeating-linear-gradient(135deg, var(--red) 0 3px, #f0a4ab 3px 5px);
+}
+
+/* 历史色块共享浮层：固定定位、跟随鼠标、不拦截事件 */
+.health-block-tip {
+  position: fixed;
+  z-index: 3000;
+  pointer-events: none;
+  max-width: 240px;
+  padding: 6px var(--space-3);
+  border-radius: var(--r-sm);
+  background: var(--text);
+  color: #fff;
+  font-size: var(--fs-xs);
+  line-height: 1.5;
+  box-shadow: 0 6px 18px rgba(23, 32, 58, 0.18);
+}
+
+/* 编辑页步骤条：可点击 + 当前可视区块高亮 */
+.editor-steps span {
+  cursor: pointer;
+  flex: none;
+  transition: color 0.15s ease;
+}
+
+.editor-steps span:hover {
+  color: var(--primary);
+}
+
+.editor-steps span.active {
+  color: var(--primary);
+}
+
+.editor-steps span.active::after {
+  content: '';
+  display: block;
+  height: 2px;
+  margin-top: 2px;
+  border-radius: var(--r-pill);
+  background: var(--primary);
+}
+
+/* 步骤跳转与校验滚动定位时避开页头遮挡 */
+.form-section {
+  scroll-margin-top: 90px;
+}
+
+/* 节点 Tab 状态快捷 chips */
+.node-status-chips {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.node-status-chips button {
+  border: 1px solid var(--line-strong);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  padding: 5px var(--space-3);
+  border-radius: var(--r-pill);
+  cursor: pointer;
+}
+
+.node-status-chips button:hover {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.node-status-chips button.active {
+  background: var(--primary-soft);
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+/* 最终下游名称单元格：窄屏时在名称下方补一行“原名” */
+.final-name-cell {
+  display: grid;
+  min-width: 0;
+}
+
+.final-name-cell > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.final-name-cell small {
+  display: none;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  /* 窄屏隐藏「原名」「规则结果」两列，原名改在最终名称下方展示 */
+  .node-panel .el-table .hide-narrow {
+    display: none;
+  }
+
+  .final-name-cell small {
+    display: block;
+  }
+
+  /* 步骤条窄屏横向滚动时步骤不被压缩 */
+  .editor-steps {
+    padding: 9px var(--space-3);
+  }
+}
+
+/* ============================================================
+   P2：锦上添花
+   保存按钮脏状态角标 / 扫码导入二维码弹层
+   ============================================================ */
+
+/* 保存按钮脏状态：右上角琥珀色脉冲点（配合 .dirty-hint 一起出现） */
+.el-button.save-dirty {
+  position: relative;
+  overflow: visible;
+}
+
+.el-button.save-dirty::after {
+  content: '';
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-pill);
+  background: var(--amber);
+  box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.45);
+  animation: save-dirty-pulse 1.6s ease-out infinite;
+}
+
+@keyframes save-dirty-pulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0.45);
+  }
+
+  70% {
+    box-shadow: 0 0 0 7px rgba(217, 119, 6, 0);
+  }
+
+  100% {
+    box-shadow: 0 0 0 0 rgba(217, 119, 6, 0);
+  }
+}
+
+/* 扫码导入弹层：画布居中，地址全文可换行，390px 屏不溢出（宽度 min(340px, 92vw)） */
+.qr-dialog .qr-body {
+  display: grid;
+  justify-items: center;
+  gap: var(--space-3);
+}
+
+.qr-dialog .qr-canvas {
+  width: 260px;
+  height: 260px;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+}
+
+.qr-dialog .qr-url {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  word-break: break-all;
+  text-align: center;
 }

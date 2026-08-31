@@ -22,6 +22,31 @@ export function size(bytes: number): string {
   return `${bytes} B`
 }
 
+export interface ImportScheme { label: string; scheme: string }
+
+/** 按客户端输出类型返回一键导入项；conf 类客户端（surge/quantumult/loon 等）没有可靠 URL scheme，返回空 */
+export function importSchemes(clientType: string, url: string): ImportScheme[] {
+  if (['mihomo', 'clash', 'clashr'].includes(clientType)) {
+    return [{ label: '导入到 Clash / Mihomo', scheme: `clash://install-config?url=${encodeURIComponent(url)}` }]
+  }
+  if (['v2ray', 'ss', 'sssub', 'ssd'].includes(clientType)) {
+    // btoa 只接受 Latin-1 字符，URL 含中文等非 ASCII 时先 encodeURI 转成百分号编码
+    return [{ label: '导入到 Shadowrocket 等', scheme: `sub://${btoa(encodeURI(url))}` }]
+  }
+  return []
+}
+
+/** 该客户端类型是否支持一键导入 */
+export function supportsImport(clientType: string): boolean {
+  return ['mihomo', 'clash', 'clashr', 'v2ray', 'ss', 'sssub', 'ssd'].includes(clientType)
+}
+
+/** 尝试唤起外部客户端导入 scheme；waitMs 后页面仍可见（未切到客户端）视为未唤起，返回 false 由调用方兜底 */
+export function openImportScheme(scheme: string, waitMs = 800): Promise<boolean> {
+  window.location.href = scheme
+  return new Promise(resolve => window.setTimeout(() => resolve(document.visibilityState !== 'visible'), waitMs))
+}
+
 /** 刷新状态排序权重：error→stale→partial→empty→ok，未知状态排最后 */
 export function statusPriority(status?: string): number {
   const weights: Record<string, number> = { error: 0, stale: 1, partial: 2, empty: 3, ok: 4 }

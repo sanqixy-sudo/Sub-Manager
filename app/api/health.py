@@ -66,9 +66,9 @@ def nodes(subscription_id: int | None = None, status: str | None = None, protoco
     history: dict[tuple[int, str], list[dict[str, Any]]] = {key: [] for key in keys}
     if keys:
         with db() as conn:
-            for item in conn.execute("SELECT subscription_id,node_key,status,tested_at FROM node_health_results WHERE tested_at>=? ORDER BY tested_at", (cutoff,)):
+            for item in conn.execute("SELECT subscription_id,node_key,status,connectivity_latency_ms,tested_at FROM node_health_results WHERE tested_at>=? ORDER BY tested_at", (cutoff,)):
                 key = (int(item["subscription_id"]), str(item["node_key"]))
-                if key in history: history[key].append({"status": item["status"], "tested_at": item["tested_at"]})
+                if key in history: history[key].append({"status": item["status"], "connectivity_latency_ms": item["connectivity_latency_ms"], "tested_at": item["tested_at"]})
     for row in rows:
         row["history"] = history[(int(row["subscription_id"]), str(row["node_key"]))]
     total, page_size, page = len(rows), min(max(page_size, 1), 100), max(page, 1)

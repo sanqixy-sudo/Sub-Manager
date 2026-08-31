@@ -37,10 +37,45 @@ const model = reactive({
   ] as Output[],
 })
 
-// 表单区块引用，校验失败时滚动定位
+// 表单区块引用，校验失败时滚动定位；同时供顶部步骤条点击跳转与可视区块高亮
 const basicSection = ref<HTMLElement | null>(null)
 const upstreamSection = ref<HTMLElement | null>(null)
+const manualSection = ref<HTMLElement | null>(null)
+const renameSection = ref<HTMLElement | null>(null)
 const outputSection = ref<HTMLElement | null>(null)
+
+// P1：可点击步骤条，点击平滑滚动到对应区块，IntersectionObserver 高亮当前可视区块
+const steps = [
+  { label: '01 基本信息', target: basicSection },
+  { label: '02 远程订阅链接', target: upstreamSection },
+  { label: '03 手动节点', target: manualSection },
+  { label: '04 订阅组默认改名', target: renameSection },
+  { label: '05 客户端输出', target: outputSection },
+]
+const activeStep = ref(0)
+
+function goStep(index: number) {
+  activeStep.value = index
+  steps[index].target.value?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+let stepObserver: IntersectionObserver | undefined
+
+function setupStepObserver() {
+  stepObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue
+        const index = steps.findIndex((s) => s.target.value === entry.target)
+        if (index >= 0) activeStep.value = index
+      }
+    },
+    { rootMargin: '-30% 0px -60% 0px' },
+  )
+  for (const s of steps) {
+    if (s.target.value) stepObserver.observe(s.target.value)
+  }
+}
 
 // 脏状态：数据加载完成后拍快照，之后与实时值对比
 let snapshot = ''
@@ -167,10 +202,12 @@ onMounted(async () => {
     model.outputs[0].update_interval_minutes = store.settings!.default_output_interval_minutes
   }
   takeSnapshot()
+  setupStepObserver()
 })
 
 onUnmounted(() => {
   window.removeEventListener('beforeunload', onBeforeUnload)
+  stepObserver?.disconnect()
 })
 
 interface ValidationProblem {
@@ -368,11 +405,17 @@ async function deleteManual(node: ManualNode) {
         <el-button v-if="editing" @click="router.push(`/groups/${route.params.id}/categories`)">
           <FolderTree />分类管理
         </el-button>
-        <el-button type="primary" :loading="saving" @click="save"><Save />保存</el-button>
+        <el-button type="primary" :class="{ 'save-dirty': dirty }" :loading="saving" @click="save"><Save />保存</el-button>
       </div>
     </header>
     <div class="editor-layout">
       <div class="editor-main">
+        <div class="editor-steps">
+          <template v-for="(s, i) in steps" :key="s.label">
+            <span :class="{ active: activeStep === i }" @click="goStep(i)">{{ s.label }}</span>
+            <i v-if="i < steps.length - 1"></i>
+          </template>
+        </div>
         <section ref="basicSection" class="panel form-section">
           <div class="section-head">
             <span>01</span>
@@ -466,7 +509,7 @@ async function deleteManual(node: ManualNode) {
             </el-collapse-item>
           </el-collapse>
         </section>
-        <section class="panel form-section">
+        <section ref="manualSection" class="panel form-section">
           <div class="section-head">
             <span>03</span>
             <div>
@@ -503,7 +546,7 @@ async function deleteManual(node: ManualNode) {
             </article>
           </div>
         </section>
-        <section class="panel form-section">
+        <section ref="renameSection" class="panel form-section">
           <div class="section-head">
             <span>04</span>
             <div>

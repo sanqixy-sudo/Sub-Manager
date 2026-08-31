@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus, RefreshCw, Search, MoreHorizontal, Copy, Server, AlertTriangle } from 'lucide-vue-next'
@@ -7,7 +7,10 @@ import { api } from '../api'
 import { useAppStore } from '../stores/app'
 import type { Group } from '../types'
 import StatusTag from '../components/StatusTag.vue'
-import { copyText, dt, duration, statusPriority } from '../utils'
+import QrDialog from '../components/QrDialog.vue'
+import { copyText, dt, duration, importSchemes, openImportScheme, statusPriority, supportsImport } from '../utils'
+
+const PAGE_SIZE = 20
 
 const store = useAppStore()
 const router = useRouter()
@@ -20,6 +23,12 @@ const urls = ref<any[]>([])
 const diagnostics = ref<any[]>([])
 const busy = ref<number | null>(null)
 const copying = ref<number | null>(null)
+const loading = ref(false)
+const page = ref(1)
+const refreshingAll = ref(false)
+const refreshProgress = ref({ done: 0, total: 0 })
+const qrVisible = ref(false)
+const qrTarget = ref<{ title: string; url: string } | null>(null)
 
 const shown = computed(() =>
   store.groups
@@ -30,6 +39,14 @@ const shown = computed(() =>
       statusPriority(a.last_refresh_status) - statusPriority(b.last_refresh_status) ||
       (b.pending_node_count || 0) - (a.pending_node_count || 0)))
 
+/** 前端分页：每页 20 条，表格与移动卡片共用 */
+const paged = computed(() => shown.value.slice((page.value - 1) * PAGE_SIZE, page.value * PAGE_SIZE))
+
+// 搜索/筛选变化时回到第 1 页
+watch([search, statusFilter, cacheFilter], () => {
+  page.value = 1
+})
+
 const next = (v?: string) => {
   if (!v) return '—'
   const m = Math.ceil((new Date(v).getTime() - Date.now()) / 60000)
@@ -38,7 +55,14 @@ const next = (v?: string) => {
 
 const enabledOutputs = (g: Group) => g.outputs.filter(x => x.enabled)
 
-onMounted(() => store.loadGroups())
+onMounted(async () => {
+  loading.value = true
+  try {
+    await store.loadGroups()
+  } finally {
+    loading.value = false
+  }
+})
 
 async function refresh(id: number) {
   busy.value = id
@@ -101,6 +125,91 @@ async function copyGroupUrl(g: Group, slug?: string) {
   }
 }
 
+/** 复制下拉统一入口：command 形如 copy:slug / import:slug / qr:slug（slug 本身不含冒号前缀，取第一个冒号切分） */
+async function onOutputCommand(g: Group, cmd: string) {
+  const sep = cmd.indexOf(':')
+  const action = cmd.slice(0, sep)
+  const slug = cmd.slice(sep + 1)
+  if (action === 'import') await importGroupUrl(g, slug)
+  else if (action === 'qr') await openQrCode(g, slug)
+  else await copyGroupUrl(g, slug)
+}
+
+/** 一键导入：尝试唤起客户端 scheme，800ms 后页面仍可见说明未唤起，复制地址兜底 */
+async function importToClient(clientType: string, url: string) {
+  const [item] = importSchemes(clientType, url)
+  if (!item) return
+  const opened = await openImportScheme(item.scheme)
+  if (!opened) {
+    await copyText(url)
+    ElMessage.warning('未检测到客户端，地址已复制，可手动粘贴')
+  }
+}
+
+/** 行内导入：取该组指定 slug（默认第一个）的公开订阅地址后唤起客户端 */
+async function importGroupUrl(g: Group, slug?: string) {
+  copying.value = g.id
+  try {
+    const list: any[] = (await api<any>(`/api/subscriptions/${g.id}/public-urls`)).urls
+    const target = slug ? list.find((u: any) => u.slug === slug) : list[0]
+    if (!target) {
+      ElMessage.warning('该组暂无可用订阅地址')
+      return
+    }
+    await importToClient(target.client_type, target.url)
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    copying.value = null
+  }
+}
+
+/** 扫码导入：取该组指定 slug（默认第一个）的公开订阅地址，弹二维码对话框 */
+async function openQrCode(g: Group, slug?: string) {
+  copying.value = g.id
+  try {
+    const list: any[] = (await api<any>(`/api/subscriptions/${g.id}/public-urls`)).urls
+    const target = slug ? list.find((u: any) => u.slug === slug) : list[0]
+    if (!target) {
+      ElMessage.warning('该组暂无可用订阅地址')
+      return
+    }
+    qrTarget.value = { title: target.name, url: target.url }
+    qrVisible.value = true
+  } catch (e: any) {
+    ElMessage.error(e.message)
+  } finally {
+    copying.value = null
+  }
+}
+
+/** 全部刷新：确认后逐个调用刷新接口，进行中显示进度，结束后汇总并重新加载 */
+async function refreshAll() {
+  const list = store.groups.slice()
+  if (!list.length || refreshingAll.value) return
+  try {
+    await ElMessageBox.confirm(`将逐个刷新全部 ${list.length} 个订阅组，可能需要一些时间。确认继续？`, '全部刷新', { type: 'warning' })
+  } catch {
+    return // 用户取消，静默
+  }
+  refreshingAll.value = true
+  refreshProgress.value = { done: 0, total: list.length }
+  let ok = 0
+  let fail = 0
+  for (const g of list) {
+    try {
+      const r: any = await api(`/api/subscriptions/${g.id}/refresh`, { method: 'POST' })
+      r.status === 'ok' ? ok++ : fail++
+    } catch {
+      fail++
+    }
+    refreshProgress.value.done++
+  }
+  refreshingAll.value = false
+  ElMessage[fail ? 'warning' : 'success'](`刷新完成：成功 ${ok}，失败 ${fail}`)
+  await store.load()
+}
+
 async function rotate(g: Group) {
   try {
     await ElMessageBox.confirm('旧订阅地址会立即失效，确认重置公开 Token？', '重置 Token', { type: 'warning' })
@@ -161,7 +270,39 @@ async function duplicate(g: Group) {
         <el-button type="primary" @click="router.push('/groups/new')"><Plus />新建订阅组</el-button>
       </div>
     </header>
-    <div class="panel table-panel">
+    <div v-if="!loading && !store.groups.length" class="panel onboard-panel">
+      <span class="onboard-icon"><Server /></span>
+      <h2>从第一个订阅组开始</h2>
+      <p class="onboard-sub">三分钟完成从订阅链接到客户端导入的完整闭环。</p>
+      <ol class="onboard-steps">
+        <li>
+          <i>1</i>
+          <div>
+            <b>新建订阅组并粘贴订阅链接</b>
+            <span>支持 Clash/YAML、Base64、URI 混合，多个来源可以一次粘贴。</span>
+          </div>
+        </li>
+        <li>
+          <i>2</i>
+          <div>
+            <b>系统定时刷新，失败自动用上次成功缓存</b>
+            <span>上游临时故障不会影响客户端正在使用的订阅。</span>
+          </div>
+        </li>
+        <li>
+          <i>3</i>
+          <div>
+            <b>复制固定订阅地址导入客户端</b>
+            <span>地址长期不变，可直接导入 Clash Verge 等客户端。</span>
+          </div>
+        </li>
+      </ol>
+      <div class="onboard-actions">
+        <el-button type="primary" @click="router.push('/groups/new')"><Plus />立即新建订阅组</el-button>
+        <el-button @click="router.push('/tools')">先去检查工具试试解析</el-button>
+      </div>
+    </div>
+    <div v-else class="panel table-panel">
       <div class="toolbar group-toolbar">
         <div class="search">
           <Search />
@@ -178,10 +319,13 @@ async function duplicate(g: Group) {
           <el-option label="旧缓存" value="stale" />
           <el-option label="暂无" value="empty" />
         </el-select>
+        <el-button :loading="refreshingAll" @click="refreshAll">
+          <RefreshCw />{{ refreshingAll ? `全部刷新（${refreshProgress.done}/${refreshProgress.total}）` : '全部刷新' }}
+        </el-button>
         <span>共 {{ shown.length }} 个订阅组</span>
       </div>
       <div class="desktop-table">
-        <el-table :data="shown" row-key="id" @row-click="openDetail">
+        <el-table :data="paged" row-key="id" @row-click="openDetail">
           <el-table-column label="订阅组" min-width="220">
             <template #default="{ row }">
               <div class="group-cell">
@@ -225,22 +369,34 @@ async function duplicate(g: Group) {
               <small>{{ duration(row.last_duration_ms) }} · {{ next(row.next_refresh_at) }}</small>
             </template>
           </el-table-column>
-          <el-table-column label="操作" width="250" fixed="right">
+          <el-table-column label="操作" width="300" fixed="right">
             <template #default="{ row }">
               <div class="row-actions" @click.stop>
                 <el-button link type="primary" :loading="busy === row.id" @click="refresh(row.id)">刷新</el-button>
                 <template v-if="enabledOutputs(row).length">
-                  <el-dropdown v-if="enabledOutputs(row).length > 1" trigger="click" @command="(slug: string) => copyGroupUrl(row, slug)">
-                    <el-button link type="primary" :loading="copying === row.id">复制地址</el-button>
+                  <el-dropdown v-if="enabledOutputs(row).length > 1" trigger="click" @command="(cmd: string) => onOutputCommand(row, cmd)">
+                    <el-button link type="primary" :loading="copying === row.id">复制 / 导入</el-button>
                     <template #dropdown>
                       <el-dropdown-menu>
-                        <el-dropdown-item v-for="o in enabledOutputs(row)" :key="o.id" :command="o.slug">
-                          {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                        <el-dropdown-item v-for="o in enabledOutputs(row)" :key="o.id" :command="`copy:${o.slug}`">
+                          复制 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                        </el-dropdown-item>
+                        <template v-for="o in enabledOutputs(row)" :key="`import-${o.id}`">
+                          <el-dropdown-item v-if="supportsImport(o.client_type)" :command="`import:${o.slug}`">
+                            导入 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                          </el-dropdown-item>
+                        </template>
+                        <el-dropdown-item v-for="o in enabledOutputs(row)" :key="`qr-${o.id}`" :command="`qr:${o.slug}`">
+                          扫码导入 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
                         </el-dropdown-item>
                       </el-dropdown-menu>
                     </template>
                   </el-dropdown>
-                  <el-button v-else link type="primary" :loading="copying === row.id" @click="copyGroupUrl(row)">复制地址</el-button>
+                  <template v-else>
+                    <el-button link type="primary" :loading="copying === row.id" @click="copyGroupUrl(row)">复制地址</el-button>
+                    <el-button v-if="supportsImport(enabledOutputs(row)[0].client_type)" link type="primary" :loading="copying === row.id" @click="importGroupUrl(row)">导入</el-button>
+                    <el-button link type="primary" :loading="copying === row.id" @click="openQrCode(row)">二维码</el-button>
+                  </template>
                 </template>
                 <el-dropdown>
                   <button class="more"><MoreHorizontal /></button>
@@ -259,7 +415,7 @@ async function duplicate(g: Group) {
         </el-table>
       </div>
       <div class="mobile-list">
-        <article v-for="g in shown" :key="g.id" @click="openDetail(g)">
+        <article v-for="g in paged" :key="g.id" @click="openDetail(g)">
           <header>
             <div class="group-cell">
               <span class="group-avatar">{{ g.name.slice(0, 1) }}</span>
@@ -282,22 +438,43 @@ async function duplicate(g: Group) {
             <span>{{ dt(g.last_success_at) }}</span>
             <div class="mobile-actions" @click.stop>
               <template v-if="enabledOutputs(g).length">
-                <el-dropdown v-if="enabledOutputs(g).length > 1" trigger="click" @command="(slug: string) => copyGroupUrl(g, slug)">
-                  <el-button link type="primary" :loading="copying === g.id">复制地址</el-button>
+                <el-dropdown v-if="enabledOutputs(g).length > 1" trigger="click" @command="(cmd: string) => onOutputCommand(g, cmd)">
+                  <el-button link type="primary" :loading="copying === g.id">复制 / 导入</el-button>
                   <template #dropdown>
                     <el-dropdown-menu>
-                      <el-dropdown-item v-for="o in enabledOutputs(g)" :key="o.id" :command="o.slug">
-                        {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                      <el-dropdown-item v-for="o in enabledOutputs(g)" :key="o.id" :command="`copy:${o.slug}`">
+                        复制 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                      </el-dropdown-item>
+                      <template v-for="o in enabledOutputs(g)" :key="`import-${o.id}`">
+                        <el-dropdown-item v-if="supportsImport(o.client_type)" :command="`import:${o.slug}`">
+                          导入 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
+                        </el-dropdown-item>
+                      </template>
+                      <el-dropdown-item v-for="o in enabledOutputs(g)" :key="`qr-${o.id}`" :command="`qr:${o.slug}`">
+                        扫码导入 {{ o.name }}（{{ store.types[o.client_type]?.label || o.client_type }}）
                       </el-dropdown-item>
                     </el-dropdown-menu>
                   </template>
                 </el-dropdown>
-                <el-button v-else link type="primary" :loading="copying === g.id" @click="copyGroupUrl(g)">复制地址</el-button>
+                <template v-else>
+                  <el-button link type="primary" :loading="copying === g.id" @click="copyGroupUrl(g)">复制地址</el-button>
+                  <el-button v-if="supportsImport(enabledOutputs(g)[0].client_type)" link type="primary" :loading="copying === g.id" @click="importGroupUrl(g)">导入</el-button>
+                  <el-button link type="primary" :loading="copying === g.id" @click="openQrCode(g)">二维码</el-button>
+                </template>
               </template>
               <el-button link type="primary" @click.stop="refresh(g.id)">刷新</el-button>
             </div>
           </footer>
         </article>
+      </div>
+      <div v-if="shown.length > PAGE_SIZE" class="group-pagination">
+        <el-pagination
+          background
+          layout="total, prev, pager, next"
+          :total="shown.length"
+          v-model:current-page="page"
+          :page-size="PAGE_SIZE"
+        />
       </div>
       <div v-if="!shown.length" class="empty">
         <Server />
@@ -364,5 +541,6 @@ async function duplicate(g: Group) {
         </div>
       </template>
     </el-drawer>
+    <QrDialog v-model="qrVisible" :title="qrTarget?.title || ''" :url="qrTarget?.url || ''" />
   </section>
 </template>
