@@ -12,10 +12,11 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import auth, categories, health as health_api, operations, settings, subscriptions
+from .api.health import _latest_rows
 from .config import APP_VERSION, CLIENT_TYPES, RULE_PRESET, STATIC_DIR, SUBCONVERTER_URL
 from .db import db, get_setting, init_db
 from .repository import load_subscription, parse_iso
-from .security import ip_allowed, redact, safe_filename
+from .security import ip_allowed, redact, safe_filename, utcnow_iso
 from .services.cache import read_output
 from .services.fetcher import fetcher
 from .services.refresh import refresh_subscription, runtime_status, scheduler_loop
@@ -169,6 +170,45 @@ async def public_subscription(token: str, slug: str, request: Request) -> Respon
     }
     media = str(meta.get("content_type", "text/plain")) if download else "text/plain; charset=utf-8"
     return Response(body, media_type=media, headers=headers)
+
+
+@app.get("/api/public/health/{token}", include_in_schema=False)
+def public_node_health(token: str, request: Request) -> dict[str, object]:
+    """公开节点状态页数据：只暴露节点名、状态与延迟，不含地址/来源等敏感信息。"""
+    with db() as conn:
+        row = conn.execute("SELECT id,name,ip_whitelist FROM subscriptions WHERE token=? AND enabled=1", (token,)).fetchone()
+    if not row:
+        raise HTTPException(404, "订阅不存在")
+    whitelist = str(row["ip_whitelist"] or "")
+    if whitelist.strip():
+        forwarded = request.headers.get("x-forwarded-for", "")
+        client_ip = forwarded.split(",")[0].strip() if forwarded.strip() else (
+            request.client.host if request.client else ""
+        )
+        if not ip_allowed(whitelist, client_ip):
+            # 404 与“订阅不存在”相同，不向外泄漏白名单存在性
+            raise HTTPException(404, "订阅不存在")
+    sub_id = int(row["id"])
+    rows = _latest_rows("WHERE n.subscription_id=?", (sub_id,))
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    history: dict[str, list[dict[str, object]]] = {}
+    with db() as conn:
+        for item in conn.execute(
+                "SELECT node_key,status,connectivity_latency_ms,tested_at FROM node_health_results "
+                "WHERE subscription_id=? AND tested_at>=? ORDER BY tested_at", (sub_id, cutoff)):
+            history.setdefault(str(item["node_key"]), []).append(
+                {"status": item["status"], "connectivity_latency_ms": item["connectivity_latency_ms"],
+                 "tested_at": item["tested_at"]})
+    nodes = [{
+        "node_key": r["node_key"], "final_name": r["final_name"], "protocol": r["protocol"],
+        "status": r["status"], "connectivity_latency_ms": r["connectivity_latency_ms"],
+        "google_ok": r["google_ok"], "google_latency_ms": r["google_latency_ms"],
+        "tested_at": r["tested_at"], "history": history.get(str(r["node_key"]), []),
+    } for r in rows]
+    counts = {name: sum(1 for x in nodes if x["status"] == name) for name in (
+        "healthy", "google_blocked", "connectivity_target_failed", "unavailable", "untested")}
+    return {"group_name": str(row["name"]), "total": len(nodes), "counts": counts,
+            "generated_at": utcnow_iso(), "nodes": nodes}
 
 
 BRAND_ASSETS = {

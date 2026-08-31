@@ -85,6 +85,10 @@ async function logout() {
     <span>正在启动 Sub Manager…</span>
   </div>
 
+  <div v-else-if="route.meta.public" class="status-public">
+    <router-view />
+  </div>
+
   <LoginView v-else-if="!store.authenticated" />
 
   <div v-else class="shell">

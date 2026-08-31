@@ -80,7 +80,9 @@ def _base_url(request: Request) -> str:
 def public_urls(sub_id: int, request: Request) -> dict[str, object]:
     group = load_subscription(sub_id)
     base = _base_url(request)
-    return {"group_id": sub_id, "enabled": group["enabled"], "urls": [{
+    return {"group_id": sub_id, "enabled": group["enabled"],
+            "status_url": f"{base}/#/status/{group['token']}",
+            "urls": [{
         "id": x["id"], "client_type": x["client_type"], "name": x["name"], "slug": x["slug"],
         "update_interval_minutes": x["update_interval_minutes"], "url": f"{base}/s/{group['token']}/{x['slug']}"
     } for x in group["outputs"] if x["enabled"]]}

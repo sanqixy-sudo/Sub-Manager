@@ -6,6 +6,7 @@ import { Activity, Play, RefreshCw, ShieldCheck } from 'lucide-vue-next'
 import { api } from '../api'
 import { useAppStore } from '../stores/app'
 import { dt } from '../utils'
+import { color, label, latency, latencyClass, slotBlocks } from '../utils/health'
 
 type Row = {
   subscription_id: number
@@ -66,54 +67,8 @@ const stats = computed(() => {
   ]
 })
 
-function latency(v?: number) {
-  return v ? `${v} ms` : '—'
-}
-
-/** 延迟按质量着色：<300ms 绿、<800ms 黄、≥800ms 红、无值灰 */
-function latencyClass(v?: number) {
-  if (!v) return 'lat-none'
-  if (v < 300) return 'lat-good'
-  if (v < 800) return 'lat-mid'
-  return 'lat-bad'
-}
-
-/** 色块时间槽位：固定 48 格铺满整个时间窗口，每格取最差状态、最高延迟 */
-const SLOT_COUNT = 48
-const SLOT_SEVERITY: Record<string, number> = {
-  unavailable: 4,
-  connectivity_target_failed: 3,
-  google_blocked: 2,
-  healthy: 1,
-}
-
-function slotBlocks(history: Row['history']) {
-  const spanMs = filters.hours * 3600_000
-  const slotMs = spanMs / SLOT_COUNT
-  const end = Date.now()
-  const start = end - spanMs
-  const slots: ({ status: string; lat: number; count: number } | undefined)[] = []
-  for (const h of history) {
-    const t = new Date(h.tested_at).getTime()
-    if (Number.isNaN(t) || t < start || t > end) continue
-    const idx = Math.min(SLOT_COUNT - 1, Math.floor((t - start) / slotMs))
-    const slot = slots[idx] || (slots[idx] = { status: 'healthy', lat: 0, count: 0 })
-    slot.count += 1
-    if ((SLOT_SEVERITY[h.status] || 0) >= (SLOT_SEVERITY[slot.status] || 0)) slot.status = h.status
-    slot.lat = Math.max(slot.lat, h.connectivity_latency_ms || 0)
-  }
-  const slotMin = Math.max(1, Math.round(slotMs / 60000))
-  return Array.from({ length: SLOT_COUNT }, (_, i) => {
-    const at = dt(new Date(start + i * slotMs).toISOString())
-    const slot = slots[i]
-    if (!slot) return { cls: 'gray', status: '', tip: `${at} 起 ${slotMin} 分钟 · 无数据` }
-    const cls = slot.status === 'healthy' ? latencyClass(slot.lat || undefined).replace('lat-none', 'gray') : color(slot.status)
-    return {
-      cls,
-      status: slot.status,
-      tip: `${at} 起 ${slotMin} 分钟 · ${slot.count} 次 · ${label(slot.status)}${slot.lat ? ` · 最高 ${slot.lat} ms` : ''}`,
-    }
-  })
+function slotBlocksFor(row: Row) {
+  return slotBlocks(row.history, filters.hours)
 }
 
 /** 卡片多选：以 subscription_id+node_key 为唯一标识 */
@@ -151,27 +106,6 @@ const cardRows = computed(() => {
   else if (cardSort.value === 'failures') list.sort((a, b) => sortByFailures(b, a))
   return list
 })
-
-function label(s: string) {
-  return ({
-    healthy: '正常',
-    google_blocked: 'Google 受限',
-    connectivity_target_failed: 'Cloudflare 异常',
-    unavailable: '不可用',
-    untested: '未测试',
-    skipped: '已跳过',
-  } as Record<string, string>)[s] || s
-}
-
-function color(s: string) {
-  return ({
-    healthy: 'green',
-    google_blocked: 'yellow',
-    connectivity_target_failed: 'blue',
-    unavailable: 'red',
-    skipped: 'gray',
-  } as Record<string, string>)[s] || 'gray'
-}
 
 /** error_code 形如 "cf:timeout,google:tls"，兼容旧的单词值；未知值原样显示 */
 const ERROR_LABELS: Record<string, string> = {
@@ -424,7 +358,7 @@ onBeforeUnmount(() => {
           </div>
           <div class="health-blocks health-card-blocks">
             <i
-              v-for="(b, i) in slotBlocks(row.history)"
+              v-for="(b, i) in slotBlocksFor(row)"
               :key="i"
               :class="[b.cls, b.status]"
               :data-tip="b.tip"
@@ -473,7 +407,7 @@ onBeforeUnmount(() => {
           <template #default="{ row }">
             <div class="health-blocks">
               <i
-                v-for="(b, i) in slotBlocks(row.history)"
+                v-for="(b, i) in slotBlocksFor(row)"
                 :key="i"
                 :class="[b.cls, b.status]"
                 :data-tip="b.tip"

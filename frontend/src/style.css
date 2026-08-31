@@ -3665,6 +3665,79 @@ main {
   font-size: var(--fs-xs);
 }
 
+/* 公开节点状态页（免登录，/#/status/{token}） */
+.status-public {
+  min-height: 100vh;
+  background: var(--bg);
+}
+
+.status-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+.status-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.status-updated {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
+.status-cards {
+  padding: 14px 0 0;
+}
+
+.status-page .health-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+@media (max-width: 760px) {
+  .status-page .health-stats {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+.status-page .health-card {
+  cursor: default;
+}
+
+.status-error {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+}
+
+.status-error > svg {
+  width: 20px;
+  color: var(--red);
+  flex: none;
+}
+
+.status-error > div {
+  display: grid;
+}
+
+.status-error span {
+  font-size: var(--fs-xs);
+  color: var(--muted);
+  margin-top: 3px;
+}
+
+.status-foot {
+  margin-top: 20px;
+  text-align: center;
+  font-size: var(--fs-xs);
+  color: var(--muted);
+}
+
 /* 组详情排序模式：搜索定位工具栏 */
 .ordering-bar {
   display: flex;

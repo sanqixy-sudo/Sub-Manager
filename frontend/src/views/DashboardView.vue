@@ -20,6 +20,7 @@ const cacheFilter = ref('')
 const drawer = ref(false)
 const selected = ref<Group | null>(null)
 const urls = ref<any[]>([])
+const statusUrl = ref('')
 const diagnostics = ref<any[]>([])
 const busy = ref<number | null>(null)
 const copying = ref<number | null>(null)
@@ -83,7 +84,9 @@ async function openDetail(group: Group) {
   drawer.value = true
   diagnostics.value = []
   try {
-    urls.value = (await api<any>(`/api/subscriptions/${group.id}/public-urls`)).urls
+    const data: any = await api<any>(`/api/subscriptions/${group.id}/public-urls`)
+    urls.value = data.urls
+    statusUrl.value = data.status_url || ''
   } catch (e: any) {
     ElMessage.error(e.message)
   }
@@ -217,7 +220,9 @@ async function rotate(g: Group) {
     return // 用户取消，静默
   }
   try {
-    urls.value = (await api<any>(`/api/subscriptions/${g.id}/rotate-token`, { method: 'POST' })).urls
+    const data: any = await api<any>(`/api/subscriptions/${g.id}/rotate-token`, { method: 'POST' })
+    urls.value = data.urls
+    statusUrl.value = data.status_url || ''
     ElMessage.success('Token 已重置')
   } catch (e: any) {
     ElMessage.error(e.message)
@@ -515,6 +520,21 @@ async function duplicate(g: Group) {
               <code>{{ u.url }}</code>
             </div>
             <el-button @click="copy(u.url)"><Copy />复制</el-button>
+          </div>
+        </section>
+        <section v-if="statusUrl" class="drawer-section">
+          <header>
+            <div>
+              <h3>节点状态页</h3>
+              <p>免登录公开页面，展示该组节点测活状态，可分享给他人。</p>
+            </div>
+          </header>
+          <div class="url-item">
+            <div>
+              <b>状态页</b>
+              <code>{{ statusUrl }}</code>
+            </div>
+            <el-button @click="copy(statusUrl)"><Copy />复制</el-button>
           </div>
         </section>
         <section class="drawer-section">

@@ -19,6 +19,7 @@ const router=createRouter({history:createWebHashHistory(),routes:[
   {path:'/groups/:id/categories',component:()=>import('./views/CategoriesView.vue'),meta:{title:'分类管理'}},
   {path:'/tools',component:()=>import('./views/ToolsView.vue'),meta:{title:'检查工具'}},
   {path:'/settings',component:()=>import('./views/SettingsView.vue'),meta:{title:'系统设置'}},
+  {path:'/status/:token',component:()=>import('./views/StatusView.vue'),meta:{title:'节点状态',public:true}},
   {path:'/:pathMatch(.*)*',redirect:'/'},
 ]})
 createApp(App).use(createPinia()).use(router).use(ElementPlus,{locale:zhCn}).mount('#app')
