@@ -22,7 +22,7 @@ from .config import (
 from .security import hash_password, utcnow_iso
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 
 def connect() -> sqlite3.Connection:
@@ -225,6 +225,11 @@ def init_db() -> None:
                 category_id INTEGER NOT NULL REFERENCES proxy_categories(id) ON DELETE CASCADE,
                 node_key TEXT NOT NULL,
                 PRIMARY KEY(category_id,node_key)
+            );
+            CREATE TABLE IF NOT EXISTS revoked_tokens (
+                token TEXT PRIMARY KEY,
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                revoked_at TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
             CREATE INDEX IF NOT EXISTS idx_upstreams_subscription ON upstreams(subscription_id, sort_order);

@@ -46,7 +46,7 @@ def test_v4_to_v5_migration_preserves_group_and_adds_operations_tables(tmp_path,
     """)
     conn.commit(); conn.close(); dbmod.init_db()
     with dbmod.db() as upgraded:
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 10
         assert tuple(upgraded.execute("SELECT id,token,config_revision FROM subscriptions").fetchone()) == (9, "unchanged-token", 7)
         assert upgraded.execute("SELECT COUNT(*) FROM refresh_runs").fetchone()[0] == 0
         assert upgraded.execute("SELECT COUNT(*) FROM node_snapshots").fetchone()[0] == 0
@@ -70,7 +70,7 @@ def test_v5_to_v6_migration_preserves_tokens_templates_and_snapshots(tmp_path, m
     """)
     conn.commit(); conn.close(); dbmod.init_db()
     with dbmod.db() as upgraded:
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 10
         groups = [tuple(row) for row in upgraded.execute(
             "SELECT token,rename_template FROM subscriptions ORDER BY id"
         )]

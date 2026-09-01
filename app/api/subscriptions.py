@@ -166,6 +166,9 @@ def rotate_token(sub_id: int, request: Request) -> dict[str, object]:
     group = load_subscription(sub_id)
     new_token = secrets.token_hex(20)
     with db() as conn:
+        # 旧 Token 进入吊销表：泄露场景下继续下发不可用节点配置，对方更新即自毁
+        conn.execute("INSERT OR IGNORE INTO revoked_tokens(token,subscription_id,revoked_at) VALUES(?,?,?)",
+                     (group["token"], sub_id, utcnow_iso()))
         conn.execute("UPDATE subscriptions SET token=?,updated_at=? WHERE id=?", (new_token, utcnow_iso(), sub_id))
         conn.commit()
     move_token(group["token"], new_token, [x["slug"] for x in group["outputs"]])

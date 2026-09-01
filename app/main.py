@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
@@ -119,11 +120,35 @@ async def health() -> dict[str, object]:
             "scheduler_enabled": get_setting("scheduler_enabled", "1") == "1", "due_groups": due_groups, **runtime, **health_runtime()}
 
 
+_POISON_NAME = "订阅已失效，请联系提供方更新"
+
+
+def _poisoned_subscription(request: Request) -> Response:
+    """旧 Token 的毒丸响应：一份只含黑洞节点的配置，对方客户端更新后即不可用。"""
+    headers = {"Cache-Control": "no-store"}
+    ua = request.headers.get("user-agent", "").lower()
+    if any(key in ua for key in ("clash", "mihomo", "stash", "flclash")):
+        body = ("proxies:\n"
+                f"  - {{name: \"{_POISON_NAME}\", type: ss, server: 127.0.0.1, port: 9, cipher: aes-128-gcm, password: expired}}\n"
+                "proxy-groups:\n"
+                f"  - {{name: PROXY, type: select, proxies: [\"{_POISON_NAME}\"]}}\n"
+                "rules:\n"
+                "  - MATCH,PROXY\n")
+        return Response(body, media_type="application/yaml; charset=utf-8", headers=headers)
+    userinfo = base64.urlsafe_b64encode(b"aes-128-gcm:expired").decode().rstrip("=")
+    uri = f"ss://{userinfo}@127.0.0.1:9#{quote(_POISON_NAME)}"
+    body = base64.b64encode((uri + "\n").encode()).decode()
+    return Response(body, media_type="text/plain; charset=utf-8", headers=headers)
+
+
 @app.get("/s/{token}/{slug}")
 async def public_subscription(token: str, slug: str, request: Request) -> Response:
     with db() as conn:
         row = conn.execute("SELECT id FROM subscriptions WHERE token=? AND enabled=1", (token,)).fetchone()
+        revoked = None if row else conn.execute("SELECT 1 FROM revoked_tokens WHERE token=?", (token,)).fetchone()
     if not row:
+        if revoked:
+            return _poisoned_subscription(request)
         raise HTTPException(404, "订阅不存在")
     group = load_subscription(int(row["id"]))
     whitelist = str(group.get("ip_whitelist") or "")

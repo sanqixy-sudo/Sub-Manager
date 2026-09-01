@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 from fastapi.testclient import TestClient
 import yaml
 import app.db as dbmod
@@ -32,7 +34,16 @@ def test_cookie_auth_and_secret_scoped_apis(tmp_path, monkeypatch) -> None:
         assert detail["upstreams"][0]["url"].endswith("token=secret") and "token" not in detail
         first=client.get(f"/api/subscriptions/{summary['id']}/public-urls").json()["urls"][0]["url"]
         second=client.post(f"/api/subscriptions/{summary['id']}/rotate-token").json()["urls"][0]["url"]
-        assert first!=second and client.get(first).status_code==404
+        assert first!=second
+        # 旧 Token 不返回 404，而是下发毒丸配置（泄露场景对方更新即自毁）
+        poisoned_yaml=client.get(first, headers={"user-agent":"ClashMetaforAndroid/2.11"})
+        assert poisoned_yaml.status_code==200 and "订阅已失效" in poisoned_yaml.text and "127.0.0.1" in poisoned_yaml.text
+        poisoned_uri=base64.b64decode(client.get(first).text).decode()
+        assert poisoned_uri.startswith("ss://") and "127.0.0.1:9" in poisoned_uri
+        old_token=first.split("/s/")[1].split("/")[0]
+        assert client.get(f"/api/public/health/{old_token}").status_code==404
+        # 从未存在过的 Token 仍然 404
+        assert client.get("/s/"+"f"*40+"/mihomo").status_code==404
 
         secret = "validation-secret-token"
         invalid = client.post("/api/subscriptions", json={
@@ -149,7 +160,7 @@ def test_v2_migration_preserves_token_and_creates_backup(tmp_path, monkeypatch) 
     with dbmod.db() as upgraded:
         row=upgraded.execute("SELECT id,token,config_revision FROM subscriptions").fetchone()
         assert tuple(row)==(7,"fixed-token-unchanged",1)
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0]==9
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0]==10
         assert row["id"] == 7
     assert len(list((tmp_path/"backups").glob("submanager-v2-*.db")))==1
 
@@ -171,7 +182,7 @@ def test_v3_migration_adds_rename_settings_and_creates_backup(tmp_path, monkeypa
     with dbmod.db() as upgraded:
         row = upgraded.execute("SELECT token,config_revision,rename_mode,rename_ignore,rename_template FROM subscriptions").fetchone()
         assert tuple(row) == ("v3-token", 5, "passthrough", "", "{index}|{flag}|{name}|{traffic}|{reset}")
-        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 9
+        assert upgraded.execute("PRAGMA user_version").fetchone()[0] == 10
     assert len(list((tmp_path / "backups").glob("submanager-v3-*.db"))) == 1
 
 
