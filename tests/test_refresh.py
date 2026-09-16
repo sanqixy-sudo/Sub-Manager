@@ -59,6 +59,7 @@ async def test_group_fetches_upstreams_once_then_renders_all_outputs(monkeypatch
 
     monkeypatch.setattr(refresh, "load_subscription", lambda _: subscription)
     monkeypatch.setattr(refresh, "db", lambda: DummyContext())
+    monkeypatch.setattr(refresh, '_same_generation', lambda _: True)
     monkeypatch.setattr(refresh.fetcher, "fetch_group", fake_fetch_group)
     monkeypatch.setattr(refresh, "merge_nodes", lambda _: ([object()] * 10, 2))
     monkeypatch.setattr(refresh, "rename_nodes", lambda *args, **kwargs: None)

@@ -33,6 +33,7 @@ class OutputIn(BaseModel):
 
 
 class SubscriptionIn(BaseModel):
+    manual_content: str | None = Field(default=None, max_length=8 * 1024 * 1024)
     name: str = Field(min_length=1, max_length=100)
     note: str = Field(default="", max_length=300)
     interval_minutes: int = Field(default=30, ge=5, le=10080)
@@ -78,6 +79,7 @@ class SettingsUpdate(BaseModel):
     health_check_timeout_seconds: int = Field(default=8, ge=3, le=30)
     health_notify_enabled: bool = False
     health_notify_webhook: str = Field(default="", max_length=500)
+    health_notify_clear: bool = False
     health_notify_threshold: int = Field(default=3, ge=1, le=20)
     admin_username: str = Field(min_length=1, max_length=64)
     current_password: str | None = Field(default=None, max_length=128)
@@ -125,9 +127,15 @@ class ManualNodeUpdate(BaseModel):
     content: str | None = Field(default=None, min_length=1, max_length=8 * 1024 * 1024)
 
 
+class HealthNodeSelection(BaseModel):
+    subscription_id: int = Field(ge=1)
+    node_key: str = Field(pattern=r'^[0-9a-f]{64}$')
+
+
 class HealthTestRequest(BaseModel):
     subscription_id: int | None = Field(default=None, ge=1)
     node_key: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    nodes: list[HealthNodeSelection] | None = Field(default=None, min_length=1, max_length=1000)
 
 
 class ProxyCategoryIn(BaseModel):

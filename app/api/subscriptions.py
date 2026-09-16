@@ -15,6 +15,7 @@ from ..operations import confirm_nodes, list_node_snapshots, list_runs, output_s
 from ..services.refresh import refresh_subscription
 from ..services.manual_nodes import delete_manual_node, import_manual_nodes, list_manual_nodes, update_manual_node
 from .deps import require_auth
+from ..services.coordination import group_mutation
 
 
 router = APIRouter(prefix="/api/subscriptions", dependencies=[Depends(require_auth)], tags=["subscriptions"])
@@ -41,6 +42,7 @@ def create_group(payload: SubscriptionIn) -> dict[str, object]:
 
 
 @router.put("/{sub_id}")
+@group_mutation
 def update_group(sub_id: int, payload: SubscriptionIn) -> dict[str, object]:
     result, removed_urls = update_subscription(sub_id, payload)
     for url in removed_urls:
@@ -50,6 +52,7 @@ def update_group(sub_id: int, payload: SubscriptionIn) -> dict[str, object]:
 
 
 @router.delete("/{sub_id}")
+@group_mutation
 def delete_group_api(sub_id: int) -> dict[str, bool]:
     group = load_subscription(sub_id)
     with db() as conn:
@@ -162,6 +165,7 @@ def delete_manual(sub_id: int, manual_id: int) -> dict[str, object]:
 
 
 @router.post("/{sub_id}/rotate-token")
+@group_mutation
 def rotate_token(sub_id: int, request: Request) -> dict[str, object]:
     group = load_subscription(sub_id)
     new_token = secrets.token_hex(20)

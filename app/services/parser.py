@@ -32,6 +32,8 @@ class NormalizedNode:
     traffic: str = ""
     reset: str = ""
     rename_managed: bool = False
+    legacy_fingerprints: list[str] = field(default_factory=list)
+    protocol_hint: str = ''
 
     def __post_init__(self) -> None:
         if not self.original_name:
@@ -43,7 +45,7 @@ class NormalizedNode:
             return str(self.proxy.get("type") or "unknown").lower()[:32]
         if self.uri:
             return urlsplit(self.uri).scheme.lower()[:32]
-        return "unknown"
+        return self.protocol_hint or 'unknown'
 
 
 @dataclass
@@ -112,6 +114,26 @@ def _proxy_fingerprint(proxy: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str).encode()).hexdigest()
 
 
+def canonical_fingerprint(proxy: dict[str, Any]) -> str:
+    """Connection identity shared by URI and YAML; names are never identity."""
+    stable = {k: v for k, v in proxy.items() if k != 'name'}
+    stable['type'] = str(stable.get('type', '')).lower()
+    stable['server'] = str(stable.get('server', '')).lower().rstrip('.')
+    if stable.get('port') is not None:
+        stable['port'] = int(stable['port'])
+    stable.setdefault('udp', True)
+    for key in ('tfo', 'skip-cert-verify'):
+        stable.setdefault(key, False)
+    if stable.get('network') in (None, '', 'raw', 'tcp'):
+        stable.pop('network', None)
+    if stable['type'] in {'vless', 'vmess', 'trojan'}:
+        stable.setdefault('tls', stable['type'] == 'trojan')
+    if stable['type'] == 'vmess':
+        stable['alterId'] = int(stable.get('alterId') or 0)
+        stable.setdefault('cipher', 'auto')
+    return hashlib.sha256(json.dumps(stable, sort_keys=True, ensure_ascii=False, separators=(',', ':')).encode()).hexdigest()
+
+
 def _query_map(uri: str) -> tuple[Any, dict[str, str]]:
     parsed = urlsplit(uri)
     return parsed, {key.lower(): value for key, value in parse_qsl(parsed.query, keep_blank_values=True)}
@@ -153,22 +175,24 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
             elif type_name == "tuic": proxy.update(uuid=secret, password=password)
             else: proxy["password"] = secret + ((":" + password) if password else "")
             network = query.get("type", "tcp").lower()
+            if network == 'raw': network = 'tcp'
             if type_name in {"vless", "trojan"}:
                 if network != "tcp": proxy["network"] = network
                 security = query.get("security", "").lower()
                 if security in {"tls", "reality"} or type_name == "trojan": proxy["tls"] = True
                 if query.get("sni"): proxy["servername"] = query["sni"]
                 if query.get("fp"): proxy["client-fingerprint"] = query["fp"]
+                if query.get('alpn'): proxy['alpn'] = query['alpn'].split(',')
                 if query.get("flow"): proxy["flow"] = query["flow"]
                 if query.get("insecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
                 if query.get("allowinsecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
                 if security == "reality":
                     proxy["reality-opts"] = {"public-key": query.get("pbk", ""), "short-id": query.get("sid", "")}
                 if network == "ws":
-                    proxy["ws-opts"] = {"path": unquote(query.get("path", "/")),
+                    proxy["ws-opts"] = {"path": query.get("path", "/"),
                                         "headers": {"Host": query["host"]} if query.get("host") else {}}
                 if network == "grpc":
-                    proxy["grpc-opts"] = {"grpc-service-name": unquote(query.get("serviceName", query.get("servicename", "")))}
+                    proxy["grpc-opts"] = {"grpc-service-name": query.get('servicename', '')}
             else:
                 if query.get("sni"): proxy["sni"] = query["sni"]
                 if query.get("insecure", "").lower() in {"1", "true"}: proxy["skip-cert-verify"] = True
@@ -177,7 +201,7 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
                     if query.get("obfs-password"): proxy["obfs-password"] = query["obfs-password"]
                     if query.get("alpn"): proxy["alpn"] = [x for x in query["alpn"].split(",") if x]
                 if type_name == "tuic":
-                    congestion = query.get("congestion_controller") or query.get("congestion-controller")
+                    congestion = query.get('congestion_control') or query.get("congestion_controller") or query.get("congestion-controller")
                     if congestion: proxy["congestion-controller"] = congestion
                     if query.get("alpn"): proxy["alpn"] = [x for x in query["alpn"].split(",") if x]
             return proxy
@@ -188,8 +212,13 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
             if not password and user:
                 decoded = base64.urlsafe_b64decode(user + "=" * (-len(user) % 4)).decode()
                 user, password = decoded.split(":", 1)
-            return {"name": name, "type": "ss", "server": parsed.hostname, "port": parsed.port,
-                    "cipher": user, "password": password, "udp": True}
+            proxy = {'name': name, 'type': 'ss', 'server': parsed.hostname, 'port': parsed.port,
+                     'cipher': user, 'password': password, 'udp': True}
+            if query.get('plugin'):
+                plugin, *parts = query['plugin'].split(';')
+                proxy['plugin'] = plugin
+                proxy['plugin-opts'] = {k: ((v.lower() == 'true') if v.lower() in {'true', 'false'} else v) if sep else True for item in parts for k, sep, v in [item.partition('=')] if k}
+            return proxy
         if scheme == "ssr":
             raw = parsed.netloc + parsed.path
             decoded = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4)).decode()
@@ -209,6 +238,34 @@ def uri_to_proxy(uri: str, name: str) -> dict[str, Any] | None:
     return None
 
 
+class BoundedSafeLoader(yaml.SafeLoader):
+    depth = 0
+    count = 0
+
+    def compose_node(self, parent, index):
+        self.depth += 1
+        self.count += 1
+        try:
+            if self.depth > 40 or self.count > 100000:
+                raise ValueError('YAML 结构超过安全限制')
+            return super().compose_node(parent, index)
+        finally:
+            self.depth -= 1
+
+
+def _check_yaml_tree(value) -> None:
+    remaining = 200000
+    def visit(item, ancestors):
+        nonlocal remaining
+        remaining -= 1
+        if remaining < 0: raise ValueError('YAML 展开超过安全限制')
+        if not isinstance(item, (dict, list)): return
+        if id(item) in ancestors: raise ValueError('不支持循环 YAML 引用')
+        for child in (item.values() if isinstance(item, dict) else item):
+            visit(child, ancestors | {id(item)})
+    visit(value, set())
+
+
 def parse_subscription(body: bytes, source_name: str, pseudo_filter: re.Pattern[str]) -> ParseResult:
     text = body.decode("utf-8", "replace").lstrip("\ufeff").strip()
     # Accept URI text copied from Markdown/JSON where punctuation is escaped
@@ -216,8 +273,9 @@ def parse_subscription(body: bytes, source_name: str, pseudo_filter: re.Pattern[
     # URI syntax characters and leaves backslashes in credentials untouched.
     text = re.sub(r"\\(?=[:@./?#=&%])", "", text)
     try:
-        document = yaml.safe_load(text)
-    except yaml.YAMLError:
+        document = yaml.load(text, Loader=BoundedSafeLoader)
+        _check_yaml_tree(document)
+    except (yaml.YAMLError, RecursionError, ValueError):
         document = None
     if isinstance(document, dict) and isinstance(document.get("proxies"), list):
         result = ParseResult("clash_yaml")
@@ -230,7 +288,16 @@ def parse_subscription(body: bytes, source_name: str, pseudo_filter: re.Pattern[
                 continue
             clean = dict(item)
             clean["name"] = name
-            result.nodes.append(NormalizedNode(name, _proxy_fingerprint(clean), source_name, proxy=clean))
+            if not clean.get('server') or not clean.get('port'):
+                result.filtered_count += 1
+                continue
+            try:
+                fingerprint = canonical_fingerprint(clean)
+            except (TypeError, ValueError, RecursionError):
+                result.filtered_count += 1
+                continue
+            result.nodes.append(NormalizedNode(name, fingerprint, source_name, proxy=clean,
+                legacy_fingerprints=[_proxy_fingerprint(clean)]))
         return result
 
     decoded = _decode_base64(body)
@@ -248,8 +315,11 @@ def parse_subscription(body: bytes, source_name: str, pseudo_filter: re.Pattern[
         if pseudo_filter.search(name):
             result.filtered_count += 1
             continue
-        result.nodes.append(NormalizedNode(name, _uri_fingerprint(uri), source_name, uri=uri,
-                                           proxy=uri_to_proxy(uri, name)))
+        proxy = uri_to_proxy(uri, name)
+        legacy = [_uri_fingerprint(uri)]
+        if proxy is not None: legacy.append(_proxy_fingerprint(proxy))
+        result.nodes.append(NormalizedNode(name, canonical_fingerprint(proxy) if proxy else legacy[0], source_name,
+                                           uri=uri, proxy=proxy, legacy_fingerprints=legacy))
     return result
 
 
@@ -283,8 +353,22 @@ def merge_nodes(parsed: list[ParseResult]) -> tuple[list[NormalizedNode], int]:
 
 def proxy_to_uri(node: NormalizedNode) -> str | None:
     proxy = node.proxy
-    if not proxy or str(proxy.get("type", "")).lower() != "vless":
-        return node.uri
+    if node.uri:
+        # Keep all provider transport options, but propagate the effective name.
+        parsed = urlsplit(node.uri)
+        if parsed.scheme == 'vmess':
+            try:
+                raw = parsed.netloc + parsed.path
+                data = json.loads(base64.urlsafe_b64decode(raw + '=' * (-len(raw) % 4)))
+                data['ps'] = node.name
+                return 'vmess://' + base64.b64encode(json.dumps(data, ensure_ascii=False).encode()).decode()
+            except (ValueError, TypeError): return None
+        if parsed.scheme != 'ssr':
+            return node.uri.split('#', 1)[0] + '#' + quote(node.name, safe='')
+    if not proxy: return node.uri
+    kind = str(proxy.get('type', '')).lower()
+    if kind != 'vless':
+        return _proxy_uri(proxy, node.name)
     server, port, uuid = proxy.get("server"), proxy.get("port"), proxy.get("uuid")
     if not server or not port or not uuid:
         return None
@@ -314,8 +398,55 @@ def proxy_to_uri(node: NormalizedNode) -> str | None:
             query["serviceName"] = str(opts["grpc-service-name"])
     if proxy.get("flow"):
         query["flow"] = str(proxy["flow"])
+    if proxy.get('skip-cert-verify'): query['allowInsecure'] = '1'
     host = f"[{server}]" if ":" in str(server) and not str(server).startswith("[") else str(server)
     return f"vless://{quote(str(uuid), safe='')}@{host}:{int(port)}?{urlencode(query)}#{quote(node.name)}"
+
+
+def _proxy_uri(p: dict[str, Any], name: str) -> str | None:
+    kind = str(p.get('type', '')).lower()
+    host, port = str(p.get('server') or ''), p.get('port')
+    if not host or not port: return None
+    address = f'[{host}]' if ':' in host else host
+    def b64(value: str) -> str:
+        return base64.urlsafe_b64encode(value.encode()).decode().rstrip('=')
+    if kind == 'ss':
+        query = ''
+        if p.get('plugin'):
+            opts = p.get('plugin-opts') or {}
+            plugin = str(p['plugin']) + ''.join(';' + str(k) + '=' + str(v).lower() if isinstance(v, bool) else ';' + str(k) + '=' + str(v) for k, v in opts.items())
+            query = '?' + urlencode({'plugin': plugin})
+        return f"ss://{b64(str(p.get('cipher', '')) + ':' + str(p.get('password', '')))}@{address}:{port}{query}#{quote(name)}"
+    if kind == 'ssr':
+        main = f"{host}:{port}:{p.get('protocol', 'origin')}:{p.get('cipher', '')}:{p.get('obfs', 'plain')}:{b64(str(p.get('password', '')))}"
+        opts = {'remarks': b64(name)}
+        for source, target in [('obfs-param', 'obfsparam'), ('protocol-param', 'protoparam')]:
+            if p.get(source): opts[target] = b64(str(p[source]))
+        return 'ssr://' + b64(main + '/?' + urlencode(opts))
+    network = str(p.get('network') or 'tcp')
+    opts = p.get(network + '-opts') or {}
+    if kind == 'vmess':
+        data = {'v': '2', 'ps': name, 'add': host, 'port': str(port), 'id': p.get('uuid'),
+                'aid': str(p.get('alterId', 0)), 'scy': p.get('cipher', 'auto'), 'net': network,
+                'tls': 'tls' if p.get('tls') else '', 'sni': p.get('servername', ''),
+                'path': opts.get('path', opts.get('grpc-service-name', '')),
+                'host': (opts.get('headers') or {}).get('Host', ''), 'allowInsecure': int(bool(p.get('skip-cert-verify')))}
+        return 'vmess://' + base64.b64encode(json.dumps(data, ensure_ascii=False).encode()).decode()
+    if kind not in {'trojan', 'hysteria2', 'tuic', 'anytls'}: return None
+    query = {}
+    for source, target in [('servername', 'sni'), ('sni', 'sni'), ('client-fingerprint', 'fp'),
+                           ('obfs', 'obfs'), ('obfs-password', 'obfs-password'), ('congestion-controller', 'congestion_control')]:
+        if p.get(source): query[target] = str(p[source])
+    if p.get('skip-cert-verify'): query['insecure'] = '1'
+    if p.get('alpn'): query['alpn'] = ','.join(p['alpn'])
+    if kind == 'trojan':
+        query.update(type=network, security='tls')
+        if opts.get('path'): query['path'] = str(opts['path'])
+        if opts.get('grpc-service-name'): query['serviceName'] = str(opts['grpc-service-name'])
+        if (opts.get('headers') or {}).get('Host'): query['host'] = opts['headers']['Host']
+    user = quote(str(p.get('password', '')), safe='')
+    if kind == 'tuic': user = quote(str(p.get('uuid', '')), safe='') + ':' + user
+    return f'{kind}://{user}@{address}:{port}?' + urlencode(query) + '#' + quote(name)
 
 
 def render_internal_sources(nodes: list[NormalizedNode]) -> list[tuple[bytes, str]]:

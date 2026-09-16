@@ -12,11 +12,19 @@ from urllib.parse import quote
 import httpx
 import yaml
 
-from ..config import CLIENT_TYPES, INTERNAL_BASE_URL, RULE_CONFIG, SUBCONVERTER_URL
+from ..config import CLIENT_TYPES, INTERNAL_BASE_URL, RULE_CONFIG, SUBCONVERTER_URL, MAX_UPSTREAM_BYTES
 from ..db import get_setting
 from ..security import redact, utcnow_iso
 from .cache import write_output
 from .parser import NormalizedNode, proxy_to_uri
+
+
+def _publish(subscription, output, body, meta):
+    staged = subscription.get('_staged_outputs')
+    if staged is not None:
+        staged.append((output['slug'], body, meta))
+    else:
+        write_output(subscription['token'], output['slug'], body, meta)
 
 
 @dataclass
@@ -114,11 +122,13 @@ async def render_output(
 ) -> dict[str, Any]:
     info = CLIENT_TYPES[output["client_type"]]
     converter_urls = source_urls
+    if info.get('rules') and all(node.proxy is not None for node in normalized_nodes):
+        converter_urls = [url for url in source_urls if url.endswith('.yaml')] or source_urls
     compatible_nodes = node_count
     if not info.get("rules"):
         uri_urls = [url for url in source_urls if url.endswith(".txt")]
         if uri_urls: converter_urls = uri_urls
-        compatible_nodes = sum(1 for node in normalized_nodes if node.uri is not None or node.protocol == "vless")
+        compatible_nodes = sum(1 for node in normalized_nodes if proxy_to_uri(node) is not None)
     skipped_nodes = max(0, node_count - compatible_nodes)
     params: dict[str, str] = {
         "target": str(info["target"]), "url": "|".join(converter_urls), "filename": output["name"],
@@ -145,7 +155,7 @@ async def render_output(
                 "filtered_count": filtered_count, "skipped_nodes": skipped, "renderer": "native-uri-base64",
                 "upstreams": [{k: x.get(k) for k in ("name", "status", "cached", "status_code", "content_type", "bytes", "duration_ms", "error", "source_format", "node_count", "filtered_count")} for x in upstream_results],
             }
-            write_output(subscription["token"], output["slug"], content, meta)
+            _publish(subscription, output, content, meta)
             return {"ok": True, "name": output["name"],
                     "duration_ms": round((time.monotonic() - started) * 1000),
                     "bytes": len(content), "renderer": "native-uri-base64", "skipped_nodes": skipped}
@@ -160,18 +170,30 @@ async def render_output(
                 "filtered_count": filtered_count, "skipped_nodes": 0, "renderer": "native-mihomo",
                 "upstreams": [{k: x.get(k) for k in ("name", "status", "cached", "status_code", "content_type", "bytes", "duration_ms", "error", "source_format", "node_count", "filtered_count")} for x in upstream_results],
             }
-            write_output(subscription["token"], output["slug"], native_mihomo, meta)
+            _publish(subscription, output, native_mihomo, meta)
             return {"ok": True, "name": output["name"], "duration_ms": round((time.monotonic() - started) * 1000),
                     "bytes": len(native_mihomo), "renderer": "native-mihomo", "skipped_nodes": 0}
         timeout_s = int(get_setting("converter_timeout_seconds", "90"))
-        response = await client.get(
-            f"{SUBCONVERTER_URL}/sub", params=params,
-            timeout=httpx.Timeout(timeout_s, connect=min(15, timeout_s)), follow_redirects=True,
-        )
-        if response.status_code >= 400:
-            raise ValueError(f"转换器 HTTP {response.status_code}: {redact(response.text)}")
+        async def convert():
+            async with client.stream('GET', f'{SUBCONVERTER_URL}/sub', params=params,
+                                     timeout=httpx.Timeout(timeout_s, connect=min(15, timeout_s)), follow_redirects=False) as incoming:
+                if incoming.status_code != 200: raise ValueError(f'转换器 HTTP {incoming.status_code}')
+                chunks, size = [], 0
+                async for chunk in incoming.aiter_bytes():
+                    size += len(chunk)
+                    if size > MAX_UPSTREAM_BYTES: raise ValueError('转换器响应超过大小限制')
+                    chunks.append(chunk)
+                return httpx.Response(200, content=b''.join(chunks), headers={'content-type': incoming.headers.get('content-type', 'text/plain')})
+        response = await asyncio.wait_for(convert(), timeout_s)
         if not response.content:
             raise ValueError("转换器返回空内容")
+        head = response.content[:512].lstrip().lower()
+        if head.startswith((b'<html', b'<!doctype', b'error', b'no nodes')):
+            raise ValueError('转换器未返回有效订阅')
+        if info['ext'] == 'yaml':
+            document = yaml.safe_load(response.content)
+            if not isinstance(document, dict) or not document.get('proxies'):
+                raise ValueError('转换器未生成任何节点')
         if compatible_nodes == 0: raise ValueError("当前节点协议不受此输出客户端支持")
         meta = {
             "updated_at": utcnow_iso(), "content_type": response.headers.get("content-type", "text/plain; charset=utf-8"),
@@ -180,7 +202,7 @@ async def render_output(
             "filtered_count": filtered_count, "renderer": "subconverter", "skipped_nodes": skipped_nodes,
             "upstreams": [{k: x.get(k) for k in ("name", "status", "cached", "status_code", "content_type", "bytes", "duration_ms", "error", "source_format", "node_count", "filtered_count")} for x in upstream_results],
         }
-        write_output(subscription["token"], output["slug"], response.content, meta)
+        _publish(subscription, output, response.content, meta)
         return {"ok": True, "name": output["name"], "duration_ms": round((time.monotonic() - started) * 1000),
                 "bytes": len(response.content), "renderer": "subconverter", "skipped_nodes": skipped_nodes}
     except Exception as exc:

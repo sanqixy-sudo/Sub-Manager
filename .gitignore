@@ -31,6 +31,8 @@ frontend/*.tsbuildinfo
 app/static/
 
 # Local tests, previews, references and handoff files
+.deploy-tools/
+.ui-verification/
 .test-*/
 .test-tmp*/
 preview-v3.2/

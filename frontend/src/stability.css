@@ -1,0 +1,13 @@
+/* Keep batch scope/actions visible without widening the page on small screens. */
+.node-batch-actions { position: sticky; top: 8px; z-index: 4; display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 12px; background: #fff; border: 1px solid #dbe6f1; border-radius: 8px; }
+.node-batch-actions .el-select { width: 240px; max-width: 100%; }
+.node-batch-actions .el-button + .el-button { margin-left: 0; }
+.node-filter-bar > .muted { white-space: normal; overflow-wrap: anywhere; }
+.health-card small em { color: #a45b00; font-style: normal; }
+.health-sort-hint { overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .node-batch-actions { top: 0; }
+  .node-batch-actions > b { width: 100%; }
+  .node-filter-bar .el-select { max-width: 100%; }
+  .health-pagination { overflow-x: auto; max-width: 100%; }
+}

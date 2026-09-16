@@ -14,20 +14,22 @@ from fastapi.staticfiles import StaticFiles
 
 from .api import auth, categories, health as health_api, operations, settings, subscriptions
 from .api.health import _latest_rows
-from .config import APP_VERSION, CLIENT_TYPES, RULE_PRESET, STATIC_DIR, SUBCONVERTER_URL
+from .config import APP_VERSION, BUILD_REVISION, BUILD_TIME, CLIENT_TYPES, RULE_PRESET, STATIC_DIR, SUBCONVERTER_URL
 from .db import db, get_setting, init_db
-from .repository import load_subscription, parse_iso
+from .repository import load_subscription, parse_iso, is_due
 from .security import ip_allowed, redact, safe_filename, utcnow_iso
 from .services.cache import read_output
 from .services.fetcher import fetcher
-from .services.refresh import refresh_subscription, runtime_status, scheduler_loop
+from .services.refresh import refresh_subscription, runtime_status, scheduler_loop, stop_refresh_tasks
 from .services.renderer import get_internal_source
-from .services.health import health_runtime, health_scheduler_loop, stop_health_task
+from .services.health import health_runtime, health_scheduler_loop, stop_health_task, verify_mihomo, seed_node_identities
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    seed_node_identities()
+    await verify_mihomo()
     await fetcher.start()
     scheduler = asyncio.create_task(scheduler_loop(), name="subscription-scheduler")
     health_scheduler = asyncio.create_task(health_scheduler_loop(), name="health-scheduler")
@@ -38,6 +40,7 @@ async def lifespan(_: FastAPI):
         health_scheduler.cancel()
         health_task = stop_health_task()
         await asyncio.gather(*[x for x in (scheduler, health_scheduler, health_task) if x], return_exceptions=True)
+        await stop_refresh_tasks()
         await fetcher.close()
 
 
@@ -107,17 +110,24 @@ async def health() -> dict[str, object]:
         pass
     with db() as conn:
         database = conn.execute("SELECT 1").fetchone() is not None
-        rows = [dict(row) for row in conn.execute("SELECT enabled,last_success_at,last_refresh_at,interval_minutes,cache_state FROM subscriptions")]
+        rows = [dict(row) for row in conn.execute("SELECT enabled,last_success_at,last_refresh_at,last_refresh_status,interval_minutes,cache_state FROM subscriptions")]
     now = datetime.now(timezone.utc)
     due_groups = 0
     for row in rows:
-        base = parse_iso(row.get("last_success_at") or row.get("last_refresh_at"))
-        if row["enabled"] and (row.get("cache_state") == "stale" or not base or now >= base + timedelta(minutes=int(row["interval_minutes"]))):
+        if row['enabled'] and is_due(row):
             due_groups += 1
     runtime = runtime_status()
-    return {"ok": database, "database": database, "subconverter": converter,
+    kernel = health_runtime()
+    return {"ok": database, 'ready': database and converter and kernel['mihomo_available'], "database": database, "subconverter": converter,
+            'build_revision': BUILD_REVISION, 'build_time': BUILD_TIME,
             "subconverter_version": version, "app_version": APP_VERSION,
             "scheduler_enabled": get_setting("scheduler_enabled", "1") == "1", "due_groups": due_groups, **runtime, **health_runtime()}
+
+
+@app.get('/api/ready', include_in_schema=False)
+async def ready() -> JSONResponse:
+    state = await health()
+    return JSONResponse({'ready': state['ready'], 'version': APP_VERSION}, status_code=200 if state['ready'] else 503)
 
 
 _POISON_NAME = "订阅已失效，请联系提供方更新"
@@ -153,10 +163,8 @@ async def public_subscription(token: str, slug: str, request: Request) -> Respon
     group = load_subscription(int(row["id"]))
     whitelist = str(group.get("ip_whitelist") or "")
     if whitelist.strip():
-        forwarded = request.headers.get("x-forwarded-for", "")
-        client_ip = forwarded.split(",")[0].strip() if forwarded.strip() else (
-            request.client.host if request.client else ""
-        )
+        # Uvicorn resolves client only for configured FORWARDED_ALLOW_IPS peers.
+        client_ip = request.client.host if request.client else ""
         if not ip_allowed(whitelist, client_ip):
             # 404 与“订阅不存在”相同，不向外泄漏白名单存在性
             raise HTTPException(404, "订阅不存在")
@@ -176,6 +184,13 @@ async def public_subscription(token: str, slug: str, request: Request) -> Respon
         refreshed = read_output(token, slug)
         if refreshed:
             cached = refreshed
+    # A request that waited for refresh must not outlive a token reset/delete.
+    with db() as conn:
+        current = conn.execute('SELECT id FROM subscriptions WHERE id=? AND token=? AND enabled=1', (group['id'], token)).fetchone()
+    if not current: raise HTTPException(404, '订阅不存在')
+    group = load_subscription(int(current['id']))
+    output = next((x for x in group['outputs'] if x['slug'] == slug and x['enabled']), None)
+    if not output: raise HTTPException(404, '输出不存在')
     stale_allowed = get_setting("stale_cache_fallback", "1") == "1"
     if not cached or (refresh_result and refresh_result.get("status") in {"stale", "error"} and not stale_allowed):
         raise HTTPException(502, "上游更新失败且没有可用缓存")
@@ -188,7 +203,7 @@ async def public_subscription(token: str, slug: str, request: Request) -> Respon
         "Cache-Control": "no-store",
         "Profile-Update-Interval": str(max(1, (int(output["update_interval_minutes"]) + 59) // 60)),
         "Content-Disposition": f"{'attachment' if download else 'inline'}; filename=\"{safe_filename(filename)}\"; filename*=UTF-8''{quote(filename)}",
-        "Profile-Title": str(output["name"]),
+        "Profile-Title": "base64:" + base64.b64encode(str(output["name"]).encode("utf-8")).decode("ascii"),
         "X-SubManager-Updated-At": str(meta.get("updated_at", "")),
         "X-SubManager-Rule": str(RULE_PRESET["id"]),
         "X-SubManager-Cache": "stale" if stale else "fresh",
@@ -206,10 +221,7 @@ def public_node_health(token: str, request: Request) -> dict[str, object]:
         raise HTTPException(404, "订阅不存在")
     whitelist = str(row["ip_whitelist"] or "")
     if whitelist.strip():
-        forwarded = request.headers.get("x-forwarded-for", "")
-        client_ip = forwarded.split(",")[0].strip() if forwarded.strip() else (
-            request.client.host if request.client else ""
-        )
+        client_ip = request.client.host if request.client else ""
         if not ip_allowed(whitelist, client_ip):
             # 404 与“订阅不存在”相同，不向外泄漏白名单存在性
             raise HTTPException(404, "订阅不存在")

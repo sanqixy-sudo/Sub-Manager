@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Activity, Play, RefreshCw, ShieldCheck } from 'lucide-vue-next'
@@ -23,6 +23,7 @@ type Row = {
   consecutive_failures: number
   error_code?: string
   tested_at?: string
+  outdated?: boolean
   history: { status: string; connectivity_latency_ms?: number; tested_at: string }[]
 }
 
@@ -51,7 +52,11 @@ const filters = reactive({
   page_size: 50,
 })
 
-const protocols = computed(() => [...new Set(rows.value.map(x => x.protocol))])
+const protocols = ref<string[]>([])
+const progress = ref<any>(null)
+let request: AbortController | undefined
+let detailRequest: AbortController | undefined
+let disposed = false
 const stats = computed(() => {
   const totalAll = overview.value.total || 0
   // 可用率 = 可用数 / 全部节点，total 为 0 时不显示百分比
@@ -100,12 +105,13 @@ const sortByTestedAt = (a: Row, b: Row) => String(a.tested_at || '').localeCompa
 
 /** 卡片视图排序（仅当前页客户端排序） */
 const cardSort = ref<'default' | 'latency' | 'failures'>('default')
-const cardRows = computed(() => {
-  const list = rows.value.slice()
-  if (cardSort.value === 'latency') list.sort(sortByLatency)
-  else if (cardSort.value === 'failures') list.sort((a, b) => sortByFailures(b, a))
-  return list
-})
+const cardRows = computed(() => rows.value)
+const tableSort = ref({ sort: 'default', descending: false })
+watch(cardSort, () => { tableSort.value = { sort: cardSort.value, descending: cardSort.value === 'failures' }; onFilterChange() })
+function onTableSort({ prop, order }: { prop: string; order: string | null }) {
+  tableSort.value = { sort: order ? prop : 'default', descending: order === 'descending' }
+  onFilterChange()
+}
 
 /** error_code 形如 "cf:timeout,google:tls"，兼容旧的单词值；未知值原样显示 */
 const ERROR_LABELS: Record<string, string> = {
@@ -129,27 +135,35 @@ function errorText(code?: string) {
 }
 
 async function load() {
+  if (disposed) return
+  request?.abort()
+  const current = request = new AbortController()
   loading.value = true
   try {
-    overview.value = await api('/api/node-health/overview')
     const q = new URLSearchParams()
     Object.entries(filters).forEach(([k, v]) => {
       if (v !== '' && v != null) q.set(k, String(v))
     })
-    const data = await api<any>(`/api/node-health/nodes?${q}`)
+    q.set('sort', tableSort.value.sort)
+    q.set('descending', String(tableSort.value.descending))
+    const [summary, data] = await Promise.all([api<any>('/api/node-health/overview', { signal: current.signal }), api<any>(`/api/node-health/nodes?${q}`, { signal: current.signal })])
+    if (current.signal.aborted) return
+    overview.value = summary
     rows.value = data.items
+    protocols.value = data.protocols || []
     total.value = data.total ?? data.items.length
     testing.value = !!overview.value.health_check_running
   } catch (e: any) {
-    ElMessage.error(e.message)
+    if (!current.signal.aborted) ElMessage.error(e.message)
   } finally {
-    loading.value = false
+    if (request === current) loading.value = false
   }
 }
 
 /** 筛选条件变化：回到第一页再加载 */
 function onFilterChange() {
   filters.page = 1
+  selectedRows.value = []
   load()
 }
 
@@ -170,6 +184,7 @@ async function test(scope: 'all' | 'group' | 'node', row?: Row) {
     }
     const result: any = await api('/api/node-health/tests', { method: 'POST', body: JSON.stringify(body) })
     testing.value = true
+    overview.value.health_check_run_id = result.run_id
     ElMessage.success(result.reused ? '已在测试中' : '测活任务已开始')
     poll()
   } catch (e: any) {
@@ -179,9 +194,23 @@ async function test(scope: 'all' | 'group' | 'node', row?: Row) {
 
 function poll() {
   window.clearInterval(timer.value)
+  let busy = false
   timer.value = window.setInterval(async () => {
-    await load()
-    if (!testing.value) window.clearInterval(timer.value)
+    if (busy || document.hidden || disposed) return
+    const runId = overview.value.health_check_run_id
+    if (!runId) return
+    busy = true
+    try {
+      progress.value = await api<any>(`/api/node-health/runs/${runId}`)
+      if (progress.value.status !== 'running') {
+        window.clearInterval(timer.value)
+        testing.value = false
+        await load()
+      }
+    } catch (e: any) {
+      window.clearInterval(timer.value)
+      if (!disposed) ElMessage.error(e.message)
+    } finally { busy = false }
   }, 2000)
 }
 
@@ -196,10 +225,8 @@ async function testSelected() {
   if (!list.length || batchTesting.value) return
   batchTesting.value = true
   try {
-    for (let i = 0; i < list.length; i += 3) {
-      await Promise.all(list.slice(i, i + 3).map(row =>
-        api('/api/node-health/tests', { method: 'POST', body: JSON.stringify({ subscription_id: row.subscription_id, node_key: row.node_key }) })))
-    }
+    const result = await api<any>('/api/node-health/tests', { method: 'POST', body: JSON.stringify({ nodes: list.map(row => ({ subscription_id: row.subscription_id, node_key: row.node_key })) }) })
+    overview.value.health_check_run_id = result.run_id
     testing.value = true
     ElMessage.success(`已对 ${list.length} 个节点发起测试`)
     poll()
@@ -211,22 +238,25 @@ async function testSelected() {
 }
 
 async function open(row: Row) {
+  detailRequest?.abort()
+  const current = detailRequest = new AbortController()
   selected.value = row
   drawer.value = true
   detail.value = []
   historyLoading.value = true
   try {
-    detail.value = (await api<any>(`/api/node-health/nodes/${row.subscription_id}/${row.node_key}/history?hours=720`)).items
+    const data = await api<any>(`/api/node-health/nodes/${row.subscription_id}/${row.node_key}/history?hours=720`, { signal: current.signal })
+    if (!current.signal.aborted) detail.value = data.items
   } catch (e: any) {
-    ElMessage.error(e.message)
+    if (!current.signal.aborted) ElMessage.error(e.message)
   } finally {
-    historyLoading.value = false
+    if (detailRequest === current) historyLoading.value = false
   }
 }
 
 // P1：抽屉迷你趋势图，取近 30 条，条高按 Cloudflare 延迟归一化到本批最大值
 const trendBars = computed(() => {
-  const items = detail.value.slice(-30)
+  const items = detail.value.slice(0, 30).reverse()
   const max = Math.max(0, ...items.map((r: any) => r.connectivity_latency_ms || 0))
   return items.map((r: any) => {
     const v = r.connectivity_latency_ms
@@ -267,6 +297,9 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  disposed = true
+  request?.abort()
+  detailRequest?.abort()
   window.clearInterval(timer.value)
   window.clearTimeout(searchTimer)
 })
@@ -298,7 +331,7 @@ onBeforeUnmount(() => {
       <Activity />
       <div>
         <b>节点测活正在运行</b>
-        <span>任务完成前页面每 2 秒自动更新，订阅刷新不受影响。</span>
+        <span>已完成 {{ progress?.completed || 0 }} / {{ progress?.total || '统计中' }}；仅更新任务进度，完成后同步节点。</span>
       </div>
     </div>
     <section class="panel health-table">
@@ -341,14 +374,14 @@ onBeforeUnmount(() => {
         <span><i class="red"></i>失败</span>
         <span><i class="gray"></i>无记录</span>
       </div>
-      <p v-if="viewMode === 'table'" class="health-sort-hint">列排序仅作用于当前页</p>
+      <p class="health-sort-hint">排序作用于全部筛选结果。历史最多保留 30 天 / 全局 50,000 条，节点较多时可能不足 30 天。下次自动测活：{{ dt(overview.health_check_next_run) }}</p>
       <div v-if="viewMode === 'cards'" v-loading="loading" class="health-cards" @mouseover="onBlockHover" @mouseleave="hideBlockTip">
         <article v-for="row in cardRows" :key="rowKey(row)" class="panel health-card" :class="{ selected: isSelected(row) }" @click="open(row)">
           <header>
-            <el-checkbox :model-value="isSelected(row)" @click.stop @change="(v: string | number | boolean) => toggleSelect(row, !!v)" />
+            <el-checkbox :model-value="isSelected(row)" :aria-label="`选择 ${row.final_name}`" @click.stop @change="(v: string | number | boolean) => toggleSelect(row, !!v)" />
             <div class="health-node">
               <b :title="row.final_name">{{ row.final_name }}</b>
-              <small>{{ row.subscription_name }} · {{ row.source_name }} · {{ row.protocol.toUpperCase() }}</small>
+              <small>{{ row.subscription_name }} · {{ row.source_name }} · {{ row.protocol.toUpperCase() }} <em v-if="row.outdated">· 结果已过期，请重新测试</em></small>
             </div>
             <span class="health-status" :class="color(row.status)" :title="errorText(row.error_code) || undefined"><i></i>{{ label(row.status) }}</span>
           </header>
@@ -367,15 +400,16 @@ onBeforeUnmount(() => {
           <footer>
             <span>连续失败 {{ row.consecutive_failures || 0 }} · {{ dt(row.tested_at) }}</span>
             <div>
+              <el-button link @click.stop="open(row)">详情</el-button>
               <el-button link type="primary" @click.stop="test('node', row)">测试</el-button>
               <el-button link type="primary" @click.stop="manage(row)">管理</el-button>
             </div>
           </footer>
         </article>
-        <p v-if="!rows.length && !loading" class="health-cards-empty">暂无节点。</p>
+        <p v-if="!rows.length && !loading" class="health-cards-empty">没有匹配节点，请调整筛选；新建组需先成功刷新。</p>
       </div>
       <div v-else class="health-table-scroll" @mouseover="onBlockHover" @mouseleave="hideBlockTip">
-      <el-table v-loading="loading" :data="rows" @row-click="open" @selection-change="(v: Row[]) => (selectedRows = v)">
+      <el-table v-loading="loading" :data="rows" @row-click="open" @sort-change="onTableSort" @selection-change="(v: Row[]) => (selectedRows = v)">
         <el-table-column type="selection" width="44" />
         <el-table-column label="节点" min-width="230">
           <template #default="{ row }">
@@ -390,7 +424,7 @@ onBeforeUnmount(() => {
             <span class="health-status" :class="color(row.status)" :title="errorText(row.error_code) || undefined"><i></i>{{ label(row.status) }}</span>
           </template>
         </el-table-column>
-        <el-table-column label="Cloudflare" width="125" sortable :sort-method="sortByLatency">
+        <el-table-column label="Cloudflare" prop="latency" width="125" sortable="custom">
           <template #default="{ row }">
             <b :class="latencyClass(row.connectivity_latency_ms)">{{ latency(row.connectivity_latency_ms) }}</b>
           </template>
@@ -400,7 +434,7 @@ onBeforeUnmount(() => {
             <b :class="row.google_ok ? latencyClass(row.google_latency_ms) : row.tested_at ? 'lat-bad' : 'lat-none'">{{ row.google_ok ? latency(row.google_latency_ms) : row.tested_at ? '失败' : '—' }}</b>
           </template>
         </el-table-column>
-        <el-table-column label="连续失败" width="105" sortable :sort-method="sortByFailures">
+        <el-table-column label="连续失败" prop="failures" width="105" sortable="custom">
           <template #default="{ row }">{{ row.consecutive_failures || 0 }}</template>
         </el-table-column>
         <el-table-column label="历史测试" min-width="230">
@@ -415,7 +449,7 @@ onBeforeUnmount(() => {
             </div>
           </template>
         </el-table-column>
-        <el-table-column label="最近测试" min-width="170" sortable :sort-method="sortByTestedAt">
+        <el-table-column label="最近测试" prop="tested_at" min-width="170" sortable="custom">
           <template #default="{ row }">{{ dt(row.tested_at) }}</template>
         </el-table-column>
         <el-table-column label="操作" width="130" fixed="right">

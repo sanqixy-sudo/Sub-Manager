@@ -1,11 +1,16 @@
 FROM node:20-alpine AS web-build
 WORKDIR /src/frontend
-COPY frontend/package.json frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
 COPY frontend/public ./public
-RUN npm install --no-audit --no-fund && npm run build
+RUN npm install -g pnpm@9.15.5 && pnpm install --frozen-lockfile && pnpm run build
 
-FROM tindy2013/subconverter:latest
+FROM tindy2013/subconverter@sha256:9fd004f00e90a7f67631f4d9a3f435c95b0fe58e7afdce8b8c6ca28c92826632
+
+ARG BUILD_REVISION=development
+ARG BUILD_TIME
+ENV BUILD_REVISION=$BUILD_REVISION BUILD_TIME=$BUILD_TIME
+LABEL org.opencontainers.image.revision=$BUILD_REVISION org.opencontainers.image.created=$BUILD_TIME
 
 ARG TARGETARCH=amd64
 ARG MIHOMO_VERSION=1.19.30
@@ -36,6 +41,7 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
+COPY VERSION /app/VERSION
 COPY --from=web-build /src/app/static /app/app/static
 COPY replacements/ /base/
 COPY supervisord.conf /etc/supervisord.conf
@@ -43,5 +49,5 @@ RUN mkdir -p /data/cache /data/upstreams /data/backups
 
 VOLUME ["/data"]
 EXPOSE 7777
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 CMD curl -fsS http://127.0.0.1:7777/api/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 CMD curl -fsS http://127.0.0.1:7777/api/ready || exit 1
 ENTRYPOINT ["/opt/venv/bin/supervisord", "-c", "/etc/supervisord.conf"]

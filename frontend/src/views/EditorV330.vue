@@ -289,6 +289,7 @@ async function save() {
   try {
     const payload = {
       ...model,
+      manual_content: manualContent.value.trim() || null,
       upstreams: model.upstreams
         .filter((x) => x.url)
         .map(({ id, name, url, enabled, rename_policy, rename_ignore, rename_template }) => ({
@@ -316,14 +317,9 @@ async function save() {
       { method: editing.value ? 'PUT' : 'POST', body: JSON.stringify(payload) },
     )
     const groupId = result.id || Number(route.params.id)
-    if (manualContent.value.trim()) {
-      await api(`/api/subscriptions/${groupId}/manual-nodes/import`, {
-        method: 'POST',
-        body: JSON.stringify({ content: manualContent.value }),
-      })
-    }
+    manualContent.value = ''
     takeSnapshot() // 保存成功，清除脏标记，离开守卫不再拦截
-    ElMessage.success('节点来源与输出已保存')
+    ElMessage.success('配置已保存；下次刷新成功后更新下游，可在详情立即刷新')
     await store.loadGroups()
     router.push(`/groups/${groupId}/detail`)
   } catch (e: any) {

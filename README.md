@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v3.4.2-2563eb?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-v3.4.4-2563eb?style=flat-square">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single--container-2496ed?style=flat-square&logo=docker&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white">
   <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&logo=vuedotjs&logoColor=white">
@@ -70,7 +70,7 @@ docker compose up -d --build
 ### Docker CLI
 
 ```bash
-docker build -t sub-manager:v3.4.2 .
+docker build -t sub-manager:v3.4.4 .
 
 docker run -d \
   --name sub-manager \
@@ -78,7 +78,7 @@ docker run -d \
   -p 7777:7777 \
   -e TZ=Asia/Shanghai \
   -v /opt/sub-manager/data:/data \
-  sub-manager:v3.4.2
+  sub-manager:v3.4.4
 ```
 
 容器只暴露 `7777`，数据库、缓存、密钥和输出均位于 `/data`。重建或升级容器时必须保留该目录。
@@ -87,7 +87,7 @@ docker run -d \
 
 升级前先备份完整 `/data`，再构建新镜像并原位替换容器。数据库迁移会在启动时自动执行，并在 schema 升级前创建备份。旧版本不能直接写入已经升级的数据库，回滚时请同时恢复升级前的数据备份。
 
-详细步骤见 [部署文档](docs/DEPLOYMENT.md) 和 [升级指南](UPDATE_GUIDE.md)。
+本版请优先阅读 [V3.4.4 升级与回滚](docs/UPGRADE-3.4.4.md)，通用步骤见 [部署文档](docs/DEPLOYMENT.md) 和 [升级指南](UPDATE_GUIDE.md)。
 
 ## 技术栈
 

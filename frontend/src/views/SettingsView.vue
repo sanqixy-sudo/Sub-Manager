@@ -8,6 +8,15 @@ import { useAppStore } from '../stores/app'
 const store = useAppStore()
 const form = reactive<any>({})
 const saving = ref(false)
+const notificationTesting = ref(false)
+async function testNotification() {
+  notificationTesting.value = true
+  try {
+    await api('/api/settings/notification-test', { method: 'POST' })
+    ElMessage.success('测试通知已送达')
+  } catch (e: any) { ElMessage.error(e.message) }
+  finally { notificationTesting.value = false }
+}
 const tab = ref('general')
 const current_password = ref('')
 const new_password = ref('')
@@ -39,6 +48,7 @@ async function save() {
       await store.logout()
     } else {
       Object.assign(store.settings!, r.settings)
+      Object.assign(form, r.settings, { health_notify_clear: false })
       takeSnapshot() // 保存成功，清除脏标记
       ElMessage.success('系统设置已保存')
     }
@@ -86,6 +96,7 @@ async function save() {
               <label>公开访问地址<el-input v-model="form.public_base_url" /></label>
               <div class="runtime-row"><span>监听端口</span><code>7777</code></div>
               <div class="runtime-row"><span>持久化目录</span><code>/data</code></div>
+              <div class="runtime-row"><span>版本 / 构建</span><code>{{ store.meta.version }} / {{ store.meta.build_revision?.slice(0, 12) || 'development' }}</code></div>
             </section>
             <section class="form-section">
               <div class="settings-title">
@@ -159,7 +170,10 @@ async function save() {
                 <el-switch v-model="form.health_notify_enabled" />
               </div>
               <template v-if="form.health_notify_enabled">
-                <label>Webhook 地址<el-input v-model="form.health_notify_webhook" placeholder="https://oapi.dingtalk.com/robot/send?access_token=…" /></label>
+                <label>Webhook 地址<el-input v-model="form.health_notify_webhook" type="password" show-password autocomplete="new-password" :placeholder="form.health_notify_webhook_configured ? '已配置；留空保留，输入新地址替换' : '输入机器人 HTTPS 地址'" /></label>
+                <el-checkbox v-model="form.health_notify_clear">保存时清除已有 Webhook</el-checkbox>
+                <el-button :loading="notificationTesting" @click="testNotification">测试已保存的通知地址</el-button>
+                <p>发送失败会自动重试，最多 5 次。最近送达：{{ store.health.notification_delivery?.status || '暂无记录' }}</p>
                 <div class="form-grid">
                   <label>告警阈值（连续失败次数）<el-input-number v-model="form.health_notify_threshold" :min="1" :max="20" /></label>
                 </div>

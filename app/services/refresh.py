@@ -2,16 +2,19 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+from fastapi import HTTPException
 
 from ..db import db, get_setting
 from ..operations import apply_node_order, prepare_node_state, store_node_snapshot, store_refresh_run
 from ..repository import load_subscription
 from ..security import redact, utcnow_iso
-from .cache import read_output
+from .cache import read_output, write_output
+from .coordination import group_lock
 from .fetcher import fetcher
 from .parser import merge_nodes, render_internal_sources
 from .parser import ParseResult
@@ -24,6 +27,8 @@ _flights: dict[int, asyncio.Task[dict[str, Any]]] = {}
 _flight_lock = asyncio.Lock()
 _scheduler_last_poll: str | None = None
 _scheduler_next_poll: str | None = None
+_scheduler_error: str | None = None
+_group_limits = weakref.WeakKeyDictionary()
 
 
 def _has_output_cache(subscription: dict[str, Any]) -> bool:
@@ -58,10 +63,47 @@ def _record_run(sub_id: int, trigger: str, started_at: str, result: dict[str, An
     )
 
 
-async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
+def _same_generation(subscription):
+    with db() as conn:
+        row = conn.execute('SELECT token,config_revision FROM subscriptions WHERE id=?', (subscription['id'],)).fetchone()
+    return bool(row and row['token'] == subscription['token'] and row['config_revision'] == subscription.get('config_revision', 1))
+
+
+def _failed_attempt(subscription, trigger, started_at, started, errors, filtered=0, upstream_results=None):
+    with group_lock(subscription['id']):
+        if not _same_generation(subscription): return {'status': 'superseded'}
+        status = 'stale' if _has_output_cache(subscription) else 'error'
+        duration = round((time.monotonic() - started) * 1000)
+        _store_group_result(subscription['id'], status=status, error='；'.join(errors),
+                            node_count=subscription.get('node_count', 0), filtered_count=subscription.get('filtered_count', filtered),
+                            duration_ms=duration, success=False)
+        result = {'status': status, 'success': 0, 'errors': errors, 'duration_ms': duration}
+        _record_run(subscription['id'], trigger, started_at, result, upstream_results)
+        return result
+
+
+async def _run_refresh(sub_id: int, trigger: str = 'manual') -> dict[str, Any]:
+    # Coalesce edits made while a network request was running into this flight.
+    for _ in range(5):
+        result = await _attempt_refresh(sub_id, trigger)
+        if result.get('status') != 'superseded':
+            return result
+    return {'status': 'stale', 'success': 0, 'errors': ['配置连续变化，请稍后刷新']}
+
+
+async def stop_refresh_tasks() -> None:
+    tasks = list(_flights.values())
+    for task in tasks:
+        task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+    _flights.clear()
+
+
+async def _attempt_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
     started = time.monotonic()
     started_at = utcnow_iso()
     subscription = load_subscription(sub_id)
+    subscription['_staged_outputs'] = []
     attempt = started_at
     with db() as conn:
         conn.execute("UPDATE subscriptions SET last_attempt_at=?,updated_at=? WHERE id=?", (attempt, attempt, sub_id))
@@ -70,14 +112,13 @@ async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
         enabled_remote = [x for x in subscription["upstreams"] if x["enabled"]]
         upstream_results = await fetcher.fetch_group(subscription) if enabled_remote else []
     except Exception as exc:
+        if not _same_generation(subscription):
+            return {'status': 'superseded'}
         error = redact(exc, known_tokens=(subscription["token"],))
-        status = "stale" if _has_output_cache(subscription) else "error"
-        duration = round((time.monotonic() - started) * 1000)
-        _store_group_result(sub_id, status=status, error=error, node_count=0, filtered_count=0, duration_ms=duration, success=False)
-        result = {"status": status, "success": 0, "errors": [error], "duration_ms": duration}
-        _record_run(sub_id, trigger, started_at, result)
-        return result
+        return _failed_attempt(subscription, trigger, started_at, started, [error])
 
+    if not _same_generation(subscription):
+        return {'status': 'superseded'}
     enabled_upstreams = [item for item in subscription["upstreams"] if item["enabled"]]
     for upstream, upstream_result in zip(enabled_upstreams, upstream_results):
         parsed = upstream_result.get("parsed")
@@ -90,19 +131,16 @@ async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
     failed = [x for x in upstream_results if not x["ok"]]
     try:
         manual_nodes = load_manual_nodes(sub_id)
+    except HTTPException:
+        return _failed_attempt(subscription, trigger, started_at, started, ['手动节点无法解密，请恢复原始密钥备份'], upstream_results=upstream_results)
     except Exception:
         # Keeps legacy/unit-test databases readable before the V7 migration is invoked.
         manual_nodes = []
     if failed and get_setting("skip_failed_upstreams", "1") != "1":
         good = []
     if not good and not manual_nodes:
-        status = "stale" if _has_output_cache(subscription) else "error"
         errors = [f"{x['name']}: {x.get('error') or '使用旧快照'}" for x in upstream_results if not x.get("fresh")]
-        duration = round((time.monotonic() - started) * 1000)
-        _store_group_result(sub_id, status=status, error="；".join(errors), node_count=0, filtered_count=0, duration_ms=duration, success=False)
-        result = {"status": status, "success": 0, "errors": errors, "duration_ms": duration}
-        _record_run(sub_id, trigger, started_at, result, upstream_results)
-        return result
+        return _failed_attempt(subscription, trigger, started_at, started, errors, upstream_results=upstream_results)
 
     parsed_sources = [x["parsed"] for x in good if x.get("parsed")]
     if manual_nodes:
@@ -110,13 +148,7 @@ async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
     nodes, filtered = merge_nodes(parsed_sources)
     if not nodes:
         error = "上游中没有可用真实节点"
-        status = "stale" if _has_output_cache(subscription) else "error"
-        duration = round((time.monotonic() - started) * 1000)
-        _store_group_result(sub_id, status=status, error=error, node_count=0, filtered_count=filtered, duration_ms=duration, success=False)
-        result = {"status": status, "success": 0, "errors": [error], "duration_ms": duration,
-                  "node_count": 0, "filtered_count": filtered}
-        _record_run(sub_id, trigger, started_at, result, upstream_results)
-        return result
+        return _failed_attempt(subscription, trigger, started_at, started, [error], filtered, upstream_results)
 
     rename_nodes(nodes, str(subscription.get("rename_mode", "passthrough")),
                  str(subscription.get("rename_ignore", "")),
@@ -141,19 +173,24 @@ async def _run_refresh(sub_id: int, trigger: str = "manual") -> dict[str, Any]:
     output_errors = [f"{x['name']}: {x['error']}" for x in output_results if not x["ok"]]
     upstream_warnings = [f"{x['name']}: {x.get('error') or '使用旧快照'}" for x in upstream_results if not x["fresh"]]
     if succeeded:
-        status = "stale" if upstream_results and not fresh else ("partial" if output_errors or upstream_warnings else "ok")
+        status = "stale" if upstream_results and not fresh and not manual_nodes else ("partial" if output_errors or upstream_warnings else "ok")
     else:
         status = "stale" if _has_output_cache(subscription) else "error"
     errors = upstream_warnings + output_errors
     duration = round((time.monotonic() - started) * 1000)
-    _store_group_result(sub_id, status=status, error="；".join(errors) or None, node_count=len(nodes),
-                        filtered_count=filtered, duration_ms=duration, success=bool(succeeded and fresh))
     result = {"status": status, "success": succeeded, "errors": errors, "duration_ms": duration,
               "node_count": len(nodes), "filtered_count": filtered, "outputs": output_results,
               "upstreams": [{k: x.get(k) for k in ("name", "status", "cached", "duration_ms", "node_count", "filtered_count", "error")} for x in upstream_results]}
-    if succeeded and status in {"ok", "partial"}:
-        store_node_snapshot(sub_id, nodes, node_preferences)
-    _record_run(sub_id, trigger, started_at, result, upstream_results)
+    with group_lock(sub_id):
+        if not _same_generation(subscription):
+            return {'status': 'superseded'}
+        if succeeded and status in {'ok', 'partial'}:
+            for slug, body, meta in subscription['_staged_outputs']:
+                write_output(subscription['token'], slug, body, meta)
+            store_node_snapshot(sub_id, nodes, node_preferences)
+        _store_group_result(sub_id, status=status, error='；'.join(errors) or None, node_count=len(nodes),
+                            filtered_count=filtered, duration_ms=duration, success=bool(succeeded and (fresh or manual_nodes)))
+        _record_run(sub_id, trigger, started_at, result, upstream_results)
     return result
 
 
@@ -161,7 +198,13 @@ async def refresh_subscription(sub_id: int, trigger: str = "manual") -> dict[str
     async with _flight_lock:
         task = _flights.get(sub_id)
         if task is None or task.done():
-            coroutine = _run_refresh(sub_id) if trigger == "manual" else _run_refresh(sub_id, trigger)
+            async def bounded():
+                loop = asyncio.get_running_loop()
+                if loop not in _group_limits:
+                    _group_limits[loop] = asyncio.Semaphore(max(1, min(10, int(get_setting('scheduler_concurrency', '3')))))
+                async with _group_limits[loop]:
+                    return await (_run_refresh(sub_id) if trigger == 'manual' else _run_refresh(sub_id, trigger))
+            coroutine = bounded()
             task = asyncio.create_task(coroutine, name=f"refresh-subscription-{sub_id}")
             _flights[sub_id] = task
     try:
@@ -174,10 +217,11 @@ async def refresh_subscription(sub_id: int, trigger: str = "manual") -> dict[str
 
 
 async def scheduler_loop() -> None:
-    global _scheduler_last_poll, _scheduler_next_poll
+    global _scheduler_last_poll, _scheduler_next_poll, _scheduler_error
     while True:
         try:
             _scheduler_last_poll = utcnow_iso()
+            _scheduler_error = None
             _scheduler_next_poll = (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
             if get_setting("scheduler_enabled", "1") == "1":
                 with db() as conn:
@@ -192,13 +236,14 @@ async def scheduler_loop() -> None:
         except asyncio.CancelledError:
             raise
         except Exception:
-            pass
+            _scheduler_error = 'scheduler_poll_failed'
         await asyncio.sleep(60)
 
 
 def runtime_status() -> dict[str, Any]:
     return {
         "last_poll_at": _scheduler_last_poll,
+        'scheduler_error_code': _scheduler_error,
         "next_poll_at": _scheduler_next_poll,
         "active_refreshes": sum(1 for task in _flights.values() if not task.done()),
         "active_group_ids": [sub_id for sub_id, task in _flights.items() if not task.done()],

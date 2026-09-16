@@ -59,7 +59,7 @@ export function slotBlocks(history: HealthHistoryItem[], hours: number) {
     const t = new Date(h.tested_at || '').getTime()
     if (Number.isNaN(t) || t < start || t > end) continue
     const idx = Math.min(SLOT_COUNT - 1, Math.floor((t - start) / slotMs))
-    const slot = slots[idx] || (slots[idx] = { status: 'healthy', lat: 0, count: 0 })
+    const slot = slots[idx] || (slots[idx] = { status: h.status, lat: 0, count: 0 })
     slot.count += 1
     if ((SLOT_SEVERITY[h.status] || 0) >= (SLOT_SEVERITY[slot.status] || 0)) slot.status = h.status
     slot.lat = Math.max(slot.lat, h.connectivity_latency_ms || 0)

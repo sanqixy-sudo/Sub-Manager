@@ -4,12 +4,13 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from ..config import APP_VERSION, CLIENT_TYPES, DATA_DIR, RULE_PRESET
+from ..config import APP_VERSION, BUILD_REVISION, BUILD_TIME, CLIENT_TYPES, DATA_DIR, RULE_PRESET
 from ..db import db, get_setting, set_settings
 from ..repository import normalize_public_base_url
 from ..schemas import SettingsUpdate
 from ..security import hash_password, verify_password
 from .deps import require_auth
+from ..services.coordination import all_groups_mutation
 
 
 router = APIRouter(prefix="/api", dependencies=[Depends(require_auth)], tags=["settings"])
@@ -38,7 +39,8 @@ def settings_payload() -> dict[str, object]:
         "health_check_concurrency": int(get_setting("health_check_concurrency", "5")),
         "health_check_timeout_seconds": int(get_setting("health_check_timeout_seconds", "8")),
         "health_notify_enabled": get_setting("health_notify_enabled", "0") == "1",
-        "health_notify_webhook": get_setting("health_notify_webhook"),
+        "health_notify_webhook": '',
+        'health_notify_webhook_configured': bool(get_setting('health_notify_webhook')),
         "health_notify_threshold": int(get_setting("health_notify_threshold", "3")),
         "default_credentials": username == "admin" and default_valid, "listen_port": 7777, "data_dir": str(DATA_DIR),
     }
@@ -46,7 +48,7 @@ def settings_payload() -> dict[str, object]:
 
 @router.get("/meta")
 def meta() -> dict[str, object]:
-    return {"version": APP_VERSION, "rule": RULE_PRESET, "site_name": get_setting("site_name", "Sub Manager"),
+    return {"version": APP_VERSION, 'build_revision': BUILD_REVISION, 'build_time': BUILD_TIME, "rule": RULE_PRESET, "site_name": get_setting("site_name", "Sub Manager"),
             "public_base_url": get_setting("public_base_url", "") or None}
 
 
@@ -56,6 +58,7 @@ def read_settings() -> dict[str, object]:
 
 
 @router.put("/settings")
+@all_groups_mutation
 def update_settings(payload: SettingsUpdate) -> dict[str, object]:
     if payload.default_client_type not in CLIENT_TYPES:
         raise HTTPException(400, "默认客户端类型不支持")
@@ -88,9 +91,10 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
         "health_check_concurrency": str(payload.health_check_concurrency),
         "health_check_timeout_seconds": str(payload.health_check_timeout_seconds),
         "health_notify_enabled": "1" if payload.health_notify_enabled else "0",
-        "health_notify_webhook": payload.health_notify_webhook.strip(),
         "health_notify_threshold": str(payload.health_notify_threshold),
     }
+    if payload.health_notify_webhook.strip() or payload.health_notify_clear:
+        values['health_notify_webhook'] = payload.health_notify_webhook.strip()
     if payload.new_password:
         values["admin_password_hash"] = hash_password(payload.new_password)
     set_settings(values)
@@ -102,6 +106,17 @@ def update_settings(payload: SettingsUpdate) -> dict[str, object]:
             conn.execute("DELETE FROM sessions")
             conn.commit()
     return {"ok": True, "reauth_required": identity_changed, "settings": settings_payload()}
+
+
+@router.post('/settings/notification-test')
+async def notification_test() -> dict[str, bool]:
+    from ..services.health import _send_notification
+    if not get_setting('health_notify_webhook'): raise HTTPException(400, '请先保存 Webhook 地址')
+    try:
+        await _send_notification([('recovered', '测试通知', '连接验证', 0)])
+    except Exception:
+        raise HTTPException(502, '通知未送达，请检查机器人地址和权限') from None
+    return {'ok': True}
 
 
 @router.get("/client-types")

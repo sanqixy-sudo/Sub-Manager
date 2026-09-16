@@ -10,6 +10,8 @@ from fastapi import HTTPException
 from .db import db, get_setting
 from .security import redact, utcnow_iso
 from .services.cache import read_output
+from .services.coordination import group_mutation
+from .services.manual_nodes import resolve_node_key, node_key_for, node_key_resolver
 from .services.parser import NormalizedNode
 from .services.renamer import apply_alias, comparison_name, ensure_unique_names
 
@@ -28,10 +30,11 @@ def prepare_node_state(subscription_id: int, nodes: list[NormalizedNode]) -> lis
             "SELECT * FROM node_preferences WHERE subscription_id=?", (subscription_id,)
         )}
     prepared: list[dict[str, Any]] = []
+    resolve_key = node_key_resolver(subscription_id)
     used_orders = [int(item.get("sort_order") or 0) for item in existing.values()]
     next_order = max(used_orders, default=-1) + 1
     for node in nodes:
-        key = _node_key(subscription_id, node.fingerprint)
+        key = resolve_key(node)
         current = redact(comparison_name(node.original_name), 160)
         old = existing.get(key)
         sort_order = int(old.get("sort_order") or 0) if old else next_order
@@ -65,16 +68,21 @@ def prepare_node_state(subscription_id: int, nodes: list[NormalizedNode]) -> lis
             "node_key": key, "alias": alias, "baseline_name": baseline, "current_name": current,
             "status": status, "previous_name": previous, "first_seen_at": first_seen, "sort_order": sort_order,
         })
-    ensure_unique_names(nodes)
+    from .categories import list_categories
+    reserved = {(str(c['icon']).strip() + ' ' if c['icon'] else '') + c['name'] for c in list_categories(subscription_id)}
+    ensure_unique_names(nodes, reserved)
     return prepared
 
 
 def store_node_snapshot(subscription_id: int, nodes: list[NormalizedNode],
                         preferences: list[dict[str, Any]] | None = None) -> None:
     now = utcnow_iso()
+    secret = get_setting('node_key_secret')
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
         conn.execute("DELETE FROM node_snapshots WHERE subscription_id=?", (subscription_id,))
+        conn.executemany('INSERT OR IGNORE INTO node_identities(subscription_id,canonical_key,node_key) VALUES(?,?,?)',
+                         [(subscription_id, node_key_for(subscription_id, n.fingerprint, secret), n.node_key) for n in nodes])
         if preferences is not None:
             conn.executemany(
                 """INSERT INTO node_preferences(subscription_id,node_key,alias,baseline_name,current_name,status,
@@ -87,13 +95,13 @@ def store_node_snapshot(subscription_id: int, nodes: list[NormalizedNode],
             )
         conn.executemany(
             """INSERT INTO node_snapshots(subscription_id,position,original_name,final_name,source_name,protocol,
-               updated_at,node_key,rule_name,alias,confirmation_status,previous_name,traffic,reset)
-               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               updated_at,node_key,rule_name,alias,confirmation_status,previous_name,traffic,reset,source_id)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             [
                 (subscription_id, index, redact(node.original_name, 160), redact(node.name, 160),
                  redact(node.source_name, 100), node.protocol, now, node.node_key, redact(node.rule_name, 160),
                  redact(node.alias, 80) if node.alias else None, node.confirmation_status,
-                 redact(node.previous_name, 160) if node.previous_name else None, node.traffic, node.reset)
+                 redact(node.previous_name, 160) if node.previous_name else None, node.traffic, node.reset, node.source_id)
                 for index, node in enumerate(nodes, 1)
             ],
         )
@@ -116,6 +124,7 @@ def apply_node_order(subscription_id: int, nodes: list[NormalizedNode]) -> list[
     return nodes
 
 
+@group_mutation
 def update_node_order(subscription_id: int, node_keys: list[str]) -> list[dict[str, Any]]:
     """Persist a complete or partial order for the current effective snapshot."""
     with db() as conn:
@@ -143,7 +152,7 @@ def list_node_snapshots(subscription_id: int) -> dict[str, Any]:
         if not conn.execute("SELECT 1 FROM subscriptions WHERE id=?", (subscription_id,)).fetchone():
             raise HTTPException(404, "订阅组不存在")
         rows = [dict(row) for row in conn.execute(
-            """SELECT n.position,n.node_key,n.original_name,n.rule_name,n.alias,n.final_name,n.source_name,n.protocol,
+            """SELECT n.position,n.node_key,n.original_name,n.rule_name,n.alias,n.final_name,n.source_name,n.source_id,n.protocol,
                n.confirmation_status,n.previous_name,n.traffic,n.reset,n.updated_at,
                h.status AS health_status,h.connectivity_latency_ms,h.google_ok,h.google_latency_ms,
                h.consecutive_failures,h.tested_at AS health_tested_at
@@ -154,9 +163,15 @@ def list_node_snapshots(subscription_id: int) -> dict[str, Any]:
         )]
     for row in rows:
         row["health_status"] = row["health_status"] or "untested"
+    # Safe effective membership includes whole-source categories, not just explicit picks.
+    from .categories import list_categories
+    categories = list_categories(subscription_id)
+    for row in rows:
+        row['category_ids'] = [c['id'] for c in categories if row['node_key'] in c['node_keys'] or row['source_id'] in c['source_ids']]
     return {"subscription_id": subscription_id, "total": len(rows), "nodes": rows}
 
 
+@group_mutation
 def update_node_preference(subscription_id: int, node_key: str, alias: str | None, confirm: bool) -> None:
     with db() as conn:
         row = conn.execute(
@@ -171,9 +186,11 @@ def update_node_preference(subscription_id: int, node_key: str, alias: str | Non
                WHERE subscription_id=? AND node_key=?""",
             (alias, baseline, status, utcnow_iso(), subscription_id, node_key),
         )
+        conn.execute("UPDATE subscriptions SET config_revision=config_revision+1,cache_state='stale' WHERE id=?", (subscription_id,))
         conn.commit()
 
 
+@group_mutation
 def confirm_nodes(subscription_id: int, node_keys: list[str] | None = None) -> int:
     with db() as conn:
         values: list[Any] = [utcnow_iso(), subscription_id]
@@ -188,6 +205,7 @@ def confirm_nodes(subscription_id: int, node_keys: list[str] | None = None) -> i
             f"""UPDATE node_preferences SET baseline_name=current_name,status='confirmed',previous_name=NULL,
                 last_seen_at=? WHERE {where}""", values
         )
+        conn.execute("UPDATE subscriptions SET config_revision=config_revision+1,cache_state='stale' WHERE id=?", (subscription_id,))
         conn.commit()
         return int(cur.rowcount)
 
@@ -272,7 +290,7 @@ def output_status(subscription: dict[str, Any], public_urls: list[dict[str, Any]
         items.append({
             "id": output["id"], "name": output["name"], "slug": output["slug"],
             "client_type": output["client_type"], "enabled": bool(output["enabled"]),
-            "status": "ready" if cached else "empty", "updated_at": meta.get("updated_at"),
+            "status": ('stale' if int(meta.get('config_revision', 0)) != subscription.get('config_revision', 1) or subscription.get('last_refresh_status') == 'stale' else 'ready') if cached else 'empty', "updated_at": meta.get("updated_at"),
             "bytes": int(meta.get("bytes", 0)), "renderer": meta.get("renderer"),
             "skipped_nodes": int(meta.get("skipped_nodes", 0)),
             "node_count": int(meta.get("node_count", 0)), "url": by_id.get(output["id"], {}).get("url"),

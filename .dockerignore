@@ -1,5 +1,7 @@
 .git
 .gitignore
+.deploy-tools
+.ui-verification
 .github
 __pycache__
 *.pyc

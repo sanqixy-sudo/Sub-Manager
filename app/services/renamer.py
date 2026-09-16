@@ -172,21 +172,16 @@ def apply_alias(node: NormalizedNode, alias: str | None, warning: bool = False) 
     _set_name(node, ("⚠️" if warning else "") + name)
 
 
-def ensure_unique_names(nodes: list[NormalizedNode]) -> None:
-
-    counts: dict[str, int] = {}
+def ensure_unique_names(nodes: list[NormalizedNode], reserved: set[str] | None = None) -> None:
+    used = {'PROXY', 'DIRECT', 'REJECT', '♻️ 自动选择', *(reserved or set())}
     for node in nodes:
-        counts[node.name] = counts.get(node.name, 0) + 1
-    seen: dict[str, int] = {}
-    for node in nodes:
-        if counts[node.name] <= 1:
-            continue
-        original_name = node.name
-        seen[original_name] = seen.get(original_name, 0) + 1
-        suffix = f" · {node.source_name}"
-        if seen[original_name] > 1:
-            suffix += f" {seen[original_name]}"
-        _set_name(node, original_name + suffix)
+        base, candidate, number = node.name, node.name, 1
+        while candidate in used:
+            suffix = f' · {node.source_name[:40]} {number}'
+            candidate = base[:160-len(suffix)] + suffix
+            number += 1
+        used.add(candidate)
+        _set_name(node, candidate)
 
 
 def comparison_name(original: str) -> str:

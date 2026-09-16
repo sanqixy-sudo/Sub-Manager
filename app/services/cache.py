@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+from threading import RLock
 import json
 import re
 from pathlib import Path
 from typing import Any
 
 from ..config import CACHE_DIR, UPSTREAM_CACHE_DIR
+
+_cache_lock = RLock()
 
 
 def output_paths(token: str, slug: str) -> tuple[Path, Path]:
@@ -17,7 +21,11 @@ def output_paths(token: str, slug: str) -> tuple[Path, Path]:
 def read_output(token: str, slug: str) -> tuple[bytes, dict[str, Any]] | None:
     body_path, meta_path = output_paths(token, slug)
     try:
-        return body_path.read_bytes(), json.loads(meta_path.read_text("utf-8"))
+        with _cache_lock:
+            meta = json.loads(meta_path.read_text('utf-8'))
+            encoded = meta.pop('_body_base64', None)
+            body = base64.b64decode(encoded, validate=True) if encoded is not None else body_path.read_bytes()
+            return body, meta
     except (OSError, ValueError):
         return None
 
@@ -26,10 +34,13 @@ def write_output(token: str, slug: str, body: bytes, meta: dict[str, Any]) -> No
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     body_path, meta_path = output_paths(token, slug)
     body_tmp, meta_tmp = body_path.with_suffix(".body.tmp"), meta_path.with_suffix(".json.tmp")
-    body_tmp.write_bytes(body)
-    meta_tmp.write_text(json.dumps(meta, ensure_ascii=False), "utf-8")
-    body_tmp.replace(body_path)
-    meta_tmp.replace(meta_path)
+    # The metadata file is a complete atomic generation. Legacy body remains
+    # for backup/rollback tooling; readers never combine different generations.
+    with _cache_lock:
+        body_tmp.write_bytes(body)
+        meta_tmp.write_text(json.dumps({**meta, '_body_base64': base64.b64encode(body).decode()}, ensure_ascii=False), 'utf-8')
+        body_tmp.replace(body_path)
+        meta_tmp.replace(meta_path)
 
 
 def upstream_paths(subscription_id: int, upstream: dict[str, Any] | str) -> tuple[Path, Path]:

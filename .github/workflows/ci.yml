@@ -20,12 +20,14 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
-      - run: npm install --no-audit --no-fund
+      - run: npm install -g pnpm@9.15.5
+      - run: pnpm install --frozen-lockfile
         working-directory: frontend
       - run: npm run build
         working-directory: frontend
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q
+      - run: python scripts/check_release.py
 
   frontend:
     runs-on: ubuntu-latest
@@ -37,6 +39,40 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version: "20"
-      - run: npm install --no-audit --no-fund
+      - run: npm install -g pnpm@9.15.5
+      - run: pnpm install --frozen-lockfile
       - run: npm test
       - run: npm run build
+
+  container:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: sub-manager:ci
+          build-args: |
+            BUILD_REVISION=${{ github.sha }}
+      - name: Start isolated container and wait for dependencies
+        shell: bash
+        run: |
+          docker run -d --name sub-manager-ci -p 127.0.0.1:17779:7777 sub-manager:ci
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:17779/api/ready; then exit 0; fi
+            sleep 2
+          done
+          exit 1
+      - run: pip install httpx
+      - run: python scripts/container_smoke.py
+      - name: Stop disposable test container
+        if: always()
+        run: docker rm -f sub-manager-ci

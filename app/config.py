@@ -4,7 +4,9 @@ import os
 from pathlib import Path
 
 
-APP_VERSION = "3.4.2"
+APP_VERSION = (Path(__file__).resolve().parent.parent / 'VERSION').read_text('utf-8').strip()
+BUILD_REVISION = os.getenv('BUILD_REVISION', 'development')
+BUILD_TIME = os.getenv('BUILD_TIME', '')
 DATA_DIR = Path(os.getenv("DATA_DIR", "/data"))
 DB_PATH = DATA_DIR / "submanager.db"
 CACHE_DIR = DATA_DIR / "cache"

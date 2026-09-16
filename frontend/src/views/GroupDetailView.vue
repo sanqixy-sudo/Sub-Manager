@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { AlertTriangle, ArrowLeft, Check, Copy, Download, Edit3, FolderTree, GripVertical, QrCode, RefreshCw, Workflow } from 'lucide-vue-next'
@@ -29,12 +29,48 @@ const ordering = ref(false)
 const orderSaving = ref(false)
 const nodeSearch = ref('')
 const nodeProtocol = ref('')
+const nodeCategory = ref<number | undefined>()
+const categories = ref<any[]>([])
+const selectedNodes = ref<NodeSnapshot[]>([])
+const batchCategory = ref<number | undefined>()
+const batchBusy = ref(false)
+async function batchNodes(action: 'test' | 'confirm' | 'category') {
+  if (!selectedNodes.value.length || batchBusy.value) return
+  batchBusy.value = true
+  try {
+    const keys = selectedNodes.value.map(n => n.node_key)
+    if (action === 'test') {
+      await api('/api/node-health/tests', { method: 'POST', body: JSON.stringify({ nodes: keys.map(node_key => ({ subscription_id: id.value, node_key })) }) })
+      ElMessage.success('选中节点已加入一个测活任务，可在测活页查看进度')
+    } else if (action === 'confirm') {
+      const result = await api<any>(`/api/subscriptions/${id.value}/nodes/confirm`, { method: 'POST', body: JSON.stringify({ node_keys: keys }) })
+      if (result.ok) ElMessage.success('选中节点已确认，下游已更新')
+      else ElMessage.warning('已确认；下游生成失败，仍保留旧输出')
+      await loadTab('nodes', true)
+    } else {
+      const category = categories.value.find(c => c.id === batchCategory.value)
+      if (!category) return ElMessage.warning('先选择要加入的分类')
+      await api(`/api/subscriptions/${id.value}/categories/${category.id}`, { method: 'PUT', body: JSON.stringify({ ...category, node_keys: [...new Set([...category.node_keys, ...keys])] }) })
+      ElMessage.success('已加入分类，其他分类保持不变；下次刷新后更新下游')
+      await loadTab('nodes', true)
+    }
+  } catch (e: any) { ElMessage.error(e.message) }
+  finally { batchBusy.value = false }
+}
 const nodeStatus = ref<'all' | 'pending' | 'confirmed'>('all')
 const nodePage = ref(1)
 const dragIndex = ref<number | null>(null)
 const orderSearch = ref('')
 const orderDropIndex = ref<number | null>(null)
 const loaded = new Set<string>()
+const requests = new Map<string, AbortController>()
+function beginRead(key: string) {
+  requests.get(key)?.abort()
+  const controller = new AbortController()
+  requests.set(key, controller)
+  return controller
+}
+onBeforeUnmount(() => { requests.forEach(r => r.abort()); requests.clear() })
 
 const enabledUpstreams = computed(() => group.value?.upstreams.filter(x => x.enabled) || [])
 const pendingNodes = computed(() => nodes.value.filter(x => x.confirmation_status !== 'confirmed'))
@@ -47,15 +83,17 @@ const nodeProtocols = computed(() => [...new Set(nodes.value.map(x => x.protocol
 const confirmedCount = computed(() => nodes.value.length - pendingNodes.value.length)
 const filteredNodes = computed(() =>
   nodes.value
+    .filter(x => !nodeCategory.value || ((x as any).category_ids || []).includes(nodeCategory.value))
     .filter(x => nodeStatus.value === 'all' || (nodeStatus.value === 'confirmed' ? x.confirmation_status === 'confirmed' : x.confirmation_status !== 'confirmed'))
     .filter(x => !nodeSearch.value || `${x.final_name} ${x.original_name} ${x.alias || ''}`.toLowerCase().includes(nodeSearch.value.toLowerCase()))
     .filter(x => !nodeProtocol.value || x.protocol === nodeProtocol.value))
 const pagedNodes = computed(() => filteredNodes.value.slice((nodePage.value - 1) * NODE_PAGE_SIZE, nodePage.value * NODE_PAGE_SIZE))
 // 排序模式的搜索定位：只影响显示，不改变底层 nodes 顺序
 const orderingData = computed(() => {
-  if (!orderSearch.value) return nodes.value
+  const subset = nodes.value.filter(x => !nodeCategory.value || ((x as any).category_ids || []).includes(nodeCategory.value))
+  if (!orderSearch.value) return subset
   const q = orderSearch.value.toLowerCase()
-  return nodes.value.filter(x => `${x.final_name} ${x.original_name} ${x.alias || ''}`.toLowerCase().includes(q))
+  return subset.filter(x => `${x.final_name} ${x.original_name} ${x.alias || ''}`.toLowerCase().includes(q))
 })
 /** 排序表格中的行 → nodes 数组中的真实下标（搜索过滤后 $index 会失真） */
 function realIndex(row: NodeSnapshot) {
@@ -63,11 +101,14 @@ function realIndex(row: NodeSnapshot) {
 }
 
 async function loadGroup(initial = false) {
+  const controller = beginRead('group')
+  const groupId = id.value
   if (initial) loading.value = true
   try {
-    group.value = await api(`/api/subscriptions/${id.value}`)
+    const data = await api<Group>(`/api/subscriptions/${groupId}`, { signal: controller.signal })
+    if (!controller.signal.aborted && id.value === groupId) group.value = data
   } catch (e: any) {
-    ElMessage.error(e.message)
+    if (!controller.signal.aborted) ElMessage.error(e.message)
   } finally {
     loading.value = false
   }
@@ -75,14 +116,25 @@ async function loadGroup(initial = false) {
 
 async function loadTab(name: string, force = false) {
   if (name === 'overview' || (loaded.has(name) && !force)) return
+  const controller = beginRead(name)
+  const groupId = id.value
   tabLoading.value = true
   try {
-    if (name === 'nodes') nodes.value = (await api<any>(`/api/subscriptions/${id.value}/nodes`)).nodes
-    if (name === 'outputs') outputs.value = (await api<any>(`/api/subscriptions/${id.value}/outputs/status`)).outputs
-    if (name === 'runs') runs.value = (await api<any>(`/api/subscriptions/${id.value}/runs?page_size=30`)).items
+    const path = { nodes: 'nodes', outputs: 'outputs/status', runs: 'runs?page_size=30' }[name]
+    if (!path) return
+    const data = await api<any>(`/api/subscriptions/${groupId}/${path}`, { signal: controller.signal })
+    if (controller.signal.aborted || id.value !== groupId) return
+    if (name === 'nodes') {
+      nodes.value = data.nodes
+      const result = await api<any>(`/api/subscriptions/${groupId}/categories`, { signal: controller.signal })
+      if (controller.signal.aborted || id.value !== groupId) return
+      categories.value = result.categories
+    }
+    if (name === 'outputs') outputs.value = data.outputs
+    if (name === 'runs') runs.value = data.items
     loaded.add(name)
   } catch (e: any) {
-    ElMessage.error(e.message)
+    if (!controller.signal.aborted) ElMessage.error(e.message)
   } finally {
     tabLoading.value = false
   }
@@ -92,8 +144,9 @@ async function refresh() {
   if (refreshing.value) return
   refreshing.value = true
   try {
-    await api(`/api/subscriptions/${id.value}/refresh`, { method: 'POST' })
-    ElMessage.success('刷新任务已完成')
+    const result: any = await api(`/api/subscriptions/${id.value}/refresh`, { method: 'POST' })
+    if (result.status === 'ok') ElMessage.success('刷新成功，下游已更新')
+    else ElMessage.warning(result.status === 'partial' ? '部分刷新成功，请查看异常详情' : '刷新未成功，仍保留上次有效输出')
     loaded.clear()
     await loadGroup()
     await loadTab(tab.value, true)
@@ -111,7 +164,8 @@ async function updateNode(row: NodeSnapshot, alias: string | null) {
     nodes.value = result.nodes.nodes
     loaded.add('nodes')
     await loadGroup()
-    ElMessage.success(alias ? '节点别名已保存' : '节点设置已更新')
+    if (result.ok) ElMessage.success('节点设置已保存，下游已更新')
+    else ElMessage.warning('设置已保存，但下游更新失败；请修复来源后重新刷新')
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
@@ -242,7 +296,8 @@ async function saveNodeOrder() {
     ordering.value = false
     loaded.add('nodes')
     await loadGroup()
-    ElMessage.success('节点顺序已保存，下游订阅已更新')
+    if (result.ok) ElMessage.success('节点顺序已保存，下游订阅已更新')
+    else ElMessage.warning('顺序已保存，下游仍是旧缓存；请重新刷新')
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
@@ -262,7 +317,8 @@ async function confirmAll() {
     nodes.value = result.nodes.nodes
     loaded.add('nodes')
     await loadGroup()
-    ElMessage.success(`已确认 ${result.confirmed} 个节点`)
+    if (result.ok) ElMessage.success(`已确认 ${result.confirmed} 个节点，下游已更新`)
+    else ElMessage.warning(`已确认 ${result.confirmed} 个节点，但下游仍是旧缓存`)
   } catch (e: any) {
     ElMessage.error(e.message)
   } finally {
@@ -303,8 +359,9 @@ watch(tab, name => {
   if (route.query.tab !== name) router.replace({ query: { ...route.query, tab: name } }).catch(() => {})
 })
 
-watch([nodeSearch, nodeProtocol, nodeStatus], () => {
+watch([nodeSearch, nodeProtocol, nodeStatus, nodeCategory], () => {
   nodePage.value = 1
+  selectedNodes.value = []
 })
 
 // 退出排序模式时清空搜索定位与拖拽状态
@@ -321,6 +378,10 @@ watch(() => route.params.id, async nv => {
   const nid = Number(nv)
   if (!nid || nid === id.value) return
   id.value = nid
+  requests.forEach(r => r.abort())
+  selectedNodes.value = []
+  nodeCategory.value = undefined
+  categories.value = []
   loaded.clear()
   group.value = null
   nodes.value = []
@@ -484,6 +545,21 @@ onMounted(async () => {
                 <el-button v-if="pendingNodes.length" type="warning" plain :loading="nodeBusy === 'all'" @click="confirmAll"><Check />全部确认</el-button>
               </div>
             </div>
+            <div class="node-filter-bar">
+              <el-select v-model="nodeCategory" placeholder="按分类查看 / 排序" clearable>
+                <el-option v-for="c in categories" :key="c.id" :value="c.id" :label="`${c.icon} ${c.name}`" />
+              </el-select>
+              <span v-if="ordering && nodeCategory" class="muted">只显示当前分类；上下移动修改全局顺序，分类专属顺序请到分类管理调整。</span>
+            </div>
+            <div v-if="selectedNodes.length && !ordering" class="node-batch-actions">
+              <b>已选 {{ selectedNodes.length }} 个节点</b>
+              <el-button :loading="batchBusy" @click="batchNodes('test')">测试选中</el-button>
+              <el-button :loading="batchBusy" @click="batchNodes('confirm')">确认选中</el-button>
+              <el-select v-model="batchCategory" placeholder="加入分类（保留其他分类）">
+                <el-option v-for="c in categories" :key="c.id" :value="c.id" :label="`${c.icon} ${c.name}`" />
+              </el-select>
+              <el-button :loading="batchBusy" @click="batchNodes('category')">加入分类</el-button>
+            </div>
             <div v-if="!ordering" class="node-filter-bar">
               <el-input v-model="nodeSearch" placeholder="按节点名称搜索" clearable />
               <el-select v-model="nodeProtocol" placeholder="全部协议" clearable>
@@ -517,8 +593,10 @@ onMounted(async () => {
               :data="ordering ? orderingData : pagedNodes"
               :max-height="ordering ? 620 : undefined"
               :row-class-name="orderRowClass"
+              @selection-change="(value: NodeSnapshot[]) => selectedNodes = value"
               empty-text="刷新成功后将在此生成脱敏节点快照"
             >
+              <el-table-column v-if="!ordering" type="selection" width="44" />
               <el-table-column v-if="ordering" label="调整" width="300">
                 <template #default="{ row }">
                   <div class="node-reorder-cell" @dragover.prevent="onDragOver(realIndex(row))" @drop="onDrop(realIndex(row))">

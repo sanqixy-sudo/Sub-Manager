@@ -19,6 +19,13 @@ const store = useAppStore()
 const route = useRoute()
 const router = useRouter()
 const title = computed(() => store.settings?.site_name || 'Sub Manager')
+function expireSession() {
+  store.authenticated = false
+  store.groups = []
+  store.settings = null
+}
+onMounted(() => window.addEventListener('session-expired', expireSession))
+onUnmounted(() => window.removeEventListener('session-expired', expireSession))
 
 onMounted(async () => {
   await store.checkSession()

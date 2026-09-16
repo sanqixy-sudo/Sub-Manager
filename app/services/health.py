@@ -7,6 +7,7 @@ import secrets
 import shutil
 import socket
 import tempfile
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -19,18 +20,50 @@ from fastapi import HTTPException
 from ..config import HEALTH_CONNECTIVITY_URL, HEALTH_GOOGLE_URL, MIHOMO_BINARY, MIHOMO_VERSION
 from ..db import db, get_setting
 from ..repository import list_subscriptions, load_subscription, parse_iso
-from ..security import utcnow_iso
+from ..security import utcnow_iso, redact
 from .cache import upstream_paths
-from .manual_nodes import load_manual_nodes, node_key_for
+from .manual_nodes import load_manual_nodes, node_key_for, resolve_node_key, node_key_resolver
 from .parser import NormalizedNode, ParseResult, merge_nodes, parse_subscription
 
 
 _task: asyncio.Task[None] | None = None
-_task_scope: tuple[int | None, str | None] | None = None
+_task_scope: tuple[Any, ...] | None = None
 _task_run_id: int | None = None
 _lock = asyncio.Lock()
 _scheduler_last_poll: str | None = None
 _scheduler_next_run: str | None = None
+_kernel_verified = False
+_kernel_version: str | None = None
+
+
+async def verify_mihomo() -> None:
+    global _kernel_verified, _kernel_version
+    _kernel_verified, _kernel_version = False, None
+    if not Path(MIHOMO_BINARY).exists(): return
+    process = await asyncio.create_subprocess_exec(MIHOMO_BINARY, '-v', stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+    try:
+        raw = await asyncio.wait_for(process.stdout.read(512), 3)
+        await asyncio.wait_for(process.wait(), 3)
+        match = re.search(r'Mihomo[^\r\n]*?v?(\d+\.\d+\.\d+)', raw.decode('utf-8', 'replace'), re.I)
+        _kernel_version = match.group(1) if match else None
+        _kernel_verified = process.returncode == 0 and _kernel_version == MIHOMO_VERSION
+    except Exception:
+        pass
+    finally:
+        if process.returncode is None:
+            process.kill(); await process.wait()
+
+
+def seed_node_identities() -> None:
+    # Read old last-good BEFORE fetching a changed source format on upgrade.
+    with db() as conn:
+        ids = [int(r[0]) for r in conn.execute('SELECT id FROM subscriptions')]
+    for sid in ids:
+        for node in _load_group_nodes(sid):
+            if not node.fingerprint: continue
+            with db() as conn:
+                conn.execute('INSERT OR IGNORE INTO node_identities(subscription_id,canonical_key,node_key) VALUES(?,?,?)', (sid, node_key_for(sid, node.fingerprint), node.node_key))
+                conn.commit()
 
 
 def _scope(subscription_id: int | None, node_key: str | None) -> str:
@@ -66,7 +99,10 @@ def _load_group_nodes(subscription_id: int) -> list[NormalizedNode]:
             parsed.append(item)
         except Exception:
             continue
-    manual = load_manual_nodes(subscription_id)
+    try:
+        manual = load_manual_nodes(subscription_id)
+    except HTTPException:
+        manual = []
     if manual:
         parsed.append(ParseResult("manual", manual))
     nodes, _ = merge_nodes(parsed)
@@ -76,8 +112,9 @@ def _load_group_nodes(subscription_id: int) -> list[NormalizedNode]:
             (subscription_id,),
         )}
     result: list[NormalizedNode] = []
+    resolve_key = node_key_resolver(subscription_id)
     for node in nodes:
-        node.node_key = node_key_for(subscription_id, node.fingerprint)
+        node.node_key = resolve_key(node)
         snap = snapshots.get(node.node_key)
         if not snap:
             continue
@@ -86,6 +123,10 @@ def _load_group_nodes(subscription_id: int) -> list[NormalizedNode]:
         if node.proxy is not None:
             node.proxy["name"] = node.name
         result.append(node)
+    found = {n.node_key for n in result}
+    for key, snap in snapshots.items():
+        if key not in found:
+            result.append(NormalizedNode(str(snap['final_name']), '', str(snap['source_name']), node_key=key, protocol_hint=str(snap['protocol'])))
     return result
 
 
@@ -123,8 +164,10 @@ def _cleanup_history() -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
     with db() as conn:
         conn.execute("DELETE FROM node_health_results WHERE tested_at<?", (cutoff,))
+        conn.execute("DELETE FROM health_check_runs WHERE started_at<? AND status!='running'", (cutoff,))
         conn.execute("DELETE FROM node_health_results WHERE id NOT IN (SELECT id FROM node_health_results ORDER BY tested_at DESC,id DESC LIMIT 50000)")
         conn.execute("DELETE FROM health_check_runs WHERE id NOT IN (SELECT id FROM health_check_runs ORDER BY started_at DESC,id DESC LIMIT 2000)")
+        conn.execute("DELETE FROM health_notifications WHERE created_at<? OR id NOT IN (SELECT id FROM health_notifications ORDER BY id DESC LIMIT 1000)", (cutoff,))
         conn.commit()
 
 
@@ -147,6 +190,7 @@ def _store_result(run_id: int, sub_id: int, node: NormalizedNode, result: dict[s
     now = utcnow_iso()
     status = str(result["status"])
     with db() as conn:
+        if not conn.execute('SELECT 1 FROM subscriptions WHERE id=?', (sub_id,)).fetchone(): return None
         old = conn.execute("SELECT consecutive_failures FROM node_health_latest WHERE subscription_id=? AND node_key=?",
                            (sub_id, node.node_key)).fetchone()
         prev_failures = int(old[0]) if old else 0
@@ -194,11 +238,57 @@ async def _send_notification(events: list[tuple[str, str, str, int]]) -> None:
                      else f"× {group} / {name} 连续失败 {failures} 次")
     if len(events) > 20:
         lines.append(f"… 其余 {len(events) - 20} 条省略")
+    async with httpx.AsyncClient(timeout=8, follow_redirects=False) as client:
+        response = await client.post(webhook, json={'msgtype': 'text', 'text': {'content': redact('\n'.join(lines), 4000)}})
+        response.raise_for_status()
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        if isinstance(body, dict) and str(body.get('errcode', body.get('code', 0))) not in {'0', '200'}:
+            raise RuntimeError('webhook_rejected')
+
+
+_notification_lock = asyncio.Lock()
+
+
+async def deliver_notifications() -> None:
+    if not get_setting('health_notify_webhook').strip(): return
+    async with _notification_lock:
+        with db() as conn:
+            rows = [dict(r) for r in conn.execute("SELECT * FROM health_notifications WHERE status='pending' AND next_attempt_at<=? ORDER BY id LIMIT 10", (utcnow_iso(),))]
+        for row in rows:
+            attempts = int(row['attempts']) + 1
+            try:
+                await _send_notification(json.loads(row['events']))
+                status, code = 'delivered', None
+            except Exception:
+                status, code = ('failed' if attempts >= 5 else 'pending'), 'delivery_failed'
+            retry = (datetime.now(timezone.utc) + timedelta(seconds=min(3600, 60 * 2 ** attempts))).isoformat()
+            with db() as conn:
+                conn.execute('UPDATE health_notifications SET status=?,attempts=?,error_code=?,updated_at=?,next_attempt_at=? WHERE id=?', (status, attempts, code, utcnow_iso(), retry, row['id']))
+                conn.commit()
+
+
+async def _validate_proxies(proxies: list[dict[str, Any]], directory: Path) -> list[dict[str, Any]]:
+    """Fast path one offline check; bisect invalid configs to isolate bad nodes."""
+    path = directory / 'validate.yaml'
+    path.touch(mode=0o600, exist_ok=True)
+    path.write_text(yaml.safe_dump({'log-level': 'silent', 'mode': 'direct', 'proxies': proxies}, allow_unicode=True), 'utf-8')
+    process = await asyncio.create_subprocess_exec(MIHOMO_BINARY, '-t', '-d', str(directory), '-f', str(path), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
     try:
-        async with httpx.AsyncClient(timeout=8) as client:
-            await client.post(webhook, json={"msgtype": "text", "text": {"content": "\n".join(lines)}})
-    except httpx.HTTPError:
-        pass
+        code = await asyncio.wait_for(process.wait(), 10)
+    except BaseException:
+        if process.returncode is None:
+            process.kill()
+            await process.wait()
+        raise
+    finally:
+        path.unlink(missing_ok=True)
+    if code == 0: return proxies
+    if len(proxies) <= 1: return []
+    middle = len(proxies) // 2
+    return await _validate_proxies(proxies[:middle], directory) + await _validate_proxies(proxies[middle:], directory)
 
 
 _ERROR_KINDS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -241,12 +331,17 @@ async def _delay(client: httpx.AsyncClient, base: str, headers: dict[str, str], 
             return False, None, _classify_error(str(exc))
 
 
-async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -> None:
+async def _run(run_id: int, subscription_id: int | None, node_key: str | None,
+               selections: tuple[tuple[int, str], ...] | None = None) -> None:
     global _task, _task_scope, _task_run_id
     process: asyncio.subprocess.Process | None = None
     temp_dir: Path | None = None
     try:
-        selected = _selected(subscription_id, node_key)
+        if selections:
+            wanted = set(selections)
+            selected = [(sid, n) for sid in sorted({s for s, _ in wanted}) for n in _load_group_nodes(sid) if (sid, n.node_key) in wanted]
+        else:
+            selected = _selected(subscription_id, node_key)
         with db() as conn:
             conn.execute("UPDATE health_check_runs SET total=? WHERE id=?", (len(selected), run_id))
             conn.commit()
@@ -272,12 +367,19 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
                 proxy["name"] = name
                 proxies.append(proxy)
                 internal_names[(sub_id, node.node_key)] = name
+            proxies = await _validate_proxies(proxies, temp_dir)
+            valid_names = {p['name'] for p in proxies}
+            for sub_id, node in supported:
+                if internal_names[(sub_id, node.node_key)] not in valid_names:
+                    _store_result(run_id, sub_id, node, {'status': 'skipped', 'error_code': 'invalid_configuration'})
+            supported = [(sid, n) for sid, n in supported if internal_names[(sid, n.node_key)] in valid_names]
             config = {"external-controller": f"127.0.0.1:{port}", "secret": secret,
                       "log-level": "silent", "mode": "direct",
                       "dns": {"enable": True, "nameserver": ["223.5.5.5", "119.29.29.29", "8.8.8.8", "1.1.1.1"],
                               "fallback-filter": {"geoip": False}},
                       "proxies": proxies}
             path = temp_dir / "config.yaml"
+            path.touch(mode=0o600, exist_ok=True)
             path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), "utf-8")
             os.chmod(path, 0o600)
             process = await asyncio.create_subprocess_exec(MIHOMO_BINARY, "-d", str(temp_dir), "-f", str(path),
@@ -322,7 +424,11 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
             conn.execute("UPDATE health_check_runs SET status='completed',finished_at=? WHERE id=?", (utcnow_iso(), run_id))
             conn.commit()
         if events:
-            await _send_notification(events)
+            events = [(kind, redact(group, 100), redact(name, 160), failures) for kind, group, name, failures in events]
+            with db() as conn:
+                conn.execute("INSERT INTO health_notifications(events,status,created_at,updated_at,next_attempt_at) VALUES(?,'pending',?,?,?)", (json.dumps(events, ensure_ascii=False), utcnow_iso(), utcnow_iso(), utcnow_iso()))
+                conn.commit()
+            await deliver_notifications()
     except asyncio.CancelledError:
         with db() as conn:
             conn.execute("UPDATE health_check_runs SET status='interrupted',finished_at=?,error_code='interrupted' WHERE id=?",
@@ -352,28 +458,37 @@ async def _run(run_id: int, subscription_id: int | None, node_key: str | None) -
 
 
 async def start_health_test(subscription_id: int | None = None, node_key: str | None = None,
-                            trigger: str = "manual") -> dict[str, Any]:
+                            trigger: str = "manual", nodes: list[tuple[int, str]] | None = None) -> dict[str, Any]:
     global _task, _task_scope, _task_run_id
     if node_key and not subscription_id:
         raise HTTPException(400, "测试单个节点时必须指定订阅组")
-    scope = (subscription_id, node_key)
+    if nodes and (subscription_id or node_key):
+        raise HTTPException(400, '批量节点与单组范围不能同时指定')
+    selections = tuple(sorted(set(nodes))) if nodes else None
+    scope = (subscription_id, node_key, selections)
     async with _lock:
         if _task and not _task.done():
             if _task_scope == scope:
                 return {"run_id": _task_run_id, "reused": True}
             raise HTTPException(409, "已有节点测活任务正在运行")
         run_id = _new_run(subscription_id, node_key, trigger)
+        if selections:
+            with db() as conn:
+                conn.execute("UPDATE health_check_runs SET scope='batch' WHERE id=?", (run_id,)); conn.commit()
         _task_scope, _task_run_id = scope, run_id
-        _task = asyncio.create_task(_run(run_id, subscription_id, node_key), name=f"health-check-{run_id}")
+        coroutine = _run(run_id, subscription_id, node_key, selections) if selections else _run(run_id, subscription_id, node_key)
+        _task = asyncio.create_task(coroutine, name=f"health-check-{run_id}")
         return {"run_id": run_id, "reused": False}
 
 
 async def health_scheduler_loop() -> None:
     global _scheduler_last_poll, _scheduler_next_run
+    _scheduler_next_run = (datetime.now(timezone.utc) + timedelta(seconds=300)).isoformat()
     await asyncio.sleep(300)
     while True:
         try:
             _scheduler_last_poll = utcnow_iso()
+            await deliver_notifications()
             # 分钟级周期；旧库仅有小时键时按 小时×60 兼容
             minutes = int(get_setting("health_check_interval_minutes")
                           or int(get_setting("health_check_interval_hours", "6")) * 60)
@@ -392,9 +507,14 @@ async def health_scheduler_loop() -> None:
 
 
 def health_runtime() -> dict[str, Any]:
+    with db() as conn:
+        delivery = conn.execute('SELECT status,attempts,error_code,updated_at FROM health_notifications ORDER BY id DESC LIMIT 1').fetchone()
     return {"health_check_running": bool(_task and not _task.done()), "health_check_run_id": _task_run_id,
+            'notification_delivery': dict(delivery) if delivery else None,
+            'health_check_enabled': get_setting('health_check_enabled', '1') == '1',
             "health_check_last_poll": _scheduler_last_poll, "health_check_next_run": _scheduler_next_run,
-            "mihomo_available": Path(MIHOMO_BINARY).exists(), "mihomo_version": MIHOMO_VERSION}
+            "mihomo_available": _kernel_verified and Path(MIHOMO_BINARY).exists(), "mihomo_version": _kernel_version,
+            'mihomo_expected_version': MIHOMO_VERSION}
 
 
 def stop_health_task() -> asyncio.Task[None] | None:

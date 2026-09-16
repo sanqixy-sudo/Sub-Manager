@@ -19,30 +19,49 @@ function friendlyMessage(detail: unknown, status: number): string {
 
 export async function api<T>(path: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method || 'GET').toUpperCase()
-  if (method === 'GET' && pendingGets.has(path)) return pendingGets.get(path) as Promise<T>
+  const share = method === 'GET' && !options.signal
+  if (share && pendingGets.has(path)) return pendingGets.get(path) as Promise<T>
   const run = (async () => {
     let response: Response
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    options.signal?.addEventListener('abort', abort, { once: true })
+    if (options.signal?.aborted) controller.abort()
+    const timeout = globalThis.setTimeout(abort, method === 'GET' ? 30000 : 660000)
     try {
       response = await fetch(path, {
         credentials: 'same-origin',
         ...options,
+        signal: controller.signal,
         headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
       })
-    } catch {
+      let data: any
+      try { data = await response.json() }
+      catch {
+        if (controller.signal.aborted) throw new DOMException('aborted', 'AbortError')
+        throw new ApiError('服务器返回了无效数据，请重试', response.status)
+      }
+      if (!response.ok) {
+        if (response.status === 401 && path !== '/api/auth/login') window.dispatchEvent(new Event('session-expired'))
+        throw new ApiError(friendlyMessage(data?.detail, response.status), response.status)
+      }
+      if (data == null) throw new ApiError('服务器返回了空数据，请重试', response.status)
+      return data as T
+    } catch (error) {
+      if (error instanceof ApiError) throw error
+      if (options.signal?.aborted) throw error
+      if (controller.signal.aborted) throw new ApiError('请求超时，请稍后重试；后台任务可能仍在运行', 0)
       // fetch 抛出 TypeError 说明网络层失败（服务未运行 / 断网 / 跨域被拦截）
       throw new ApiError('网络连接失败，请检查服务是否运行', 0)
+    } finally {
+      globalThis.clearTimeout(timeout)
+      options.signal?.removeEventListener('abort', abort)
     }
-    let data: any = null
-    try {
-      data = await response.json()
-    } catch {}
-    if (!response.ok) throw new ApiError(friendlyMessage(data?.detail, response.status), response.status)
-    return data as T
   })()
-  if (method === 'GET') pendingGets.set(path, run)
+  if (share) pendingGets.set(path, run)
   try {
     return await run
   } finally {
-    if (method === 'GET') pendingGets.delete(path)
+    if (share) pendingGets.delete(path)
   }
 }

@@ -22,7 +22,7 @@ from .config import (
 from .security import hash_password, utcnow_iso
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 
 def connect() -> sqlite3.Connection:
@@ -56,10 +56,10 @@ def _backup_existing(old_version: int) -> None:
     if not DB_PATH.exists() or DB_PATH.stat().st_size == 0:
         return
     BACKUP_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
     label = "v2" if old_version < 3 else f"v{old_version}"
     target = BACKUP_DIR / f"submanager-{label}-{stamp}.db"
-    if not any(BACKUP_DIR.glob(f"submanager-{label}-*.db")):
+    if not target.exists():
         source = sqlite3.connect(DB_PATH)
         destination = sqlite3.connect(target)
         try:
@@ -77,6 +77,8 @@ def init_db() -> None:
     if existing:
         with db() as conn:
             old_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if old_version > SCHEMA_VERSION:
+            raise RuntimeError("数据库版本高于当前程序；回滚必须恢复升级前备份")
         if old_version < SCHEMA_VERSION:
             _backup_existing(old_version)
 
@@ -231,6 +233,16 @@ def init_db() -> None:
                 subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
                 revoked_at TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS node_identities (
+                subscription_id INTEGER NOT NULL REFERENCES subscriptions(id) ON DELETE CASCADE,
+                canonical_key TEXT NOT NULL, node_key TEXT NOT NULL,
+                PRIMARY KEY(subscription_id,canonical_key)
+            );
+            CREATE TABLE IF NOT EXISTS health_notifications (
+                id INTEGER PRIMARY KEY AUTOINCREMENT, events TEXT NOT NULL,
+                status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+                error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, next_attempt_at TEXT NOT NULL
+            );
             CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
             CREATE INDEX IF NOT EXISTS idx_upstreams_subscription ON upstreams(subscription_id, sort_order);
             CREATE INDEX IF NOT EXISTS idx_refresh_runs_finished ON refresh_runs(finished_at DESC);
@@ -284,6 +296,7 @@ def init_db() -> None:
             "previous_name": "TEXT",
             "traffic": "TEXT NOT NULL DEFAULT ''",
             "reset": "TEXT NOT NULL DEFAULT ''",
+            'source_id': 'INTEGER',
         }.items():
             _ensure_column(conn, "node_snapshots", name, ddl)
         _ensure_column(conn, "node_preferences", "sort_order", "INTEGER NOT NULL DEFAULT 0")
@@ -300,6 +313,14 @@ def init_db() -> None:
             )
 
         ts = utcnow_iso()
+        legacy_hours = conn.execute("SELECT value FROM settings WHERE key='health_check_interval_hours'").fetchone()
+        if legacy_hours:
+            try:
+                minutes = max(10, min(10080, int(legacy_hours[0]) * 60))
+            except (ValueError, TypeError):
+                minutes = 30
+            conn.execute("INSERT OR IGNORE INTO settings(key,value,updated_at) VALUES('health_check_interval_minutes',?,?)", (str(minutes), ts))
+        conn.execute("UPDATE health_check_runs SET status='interrupted',finished_at=?,error_code='service_restarted' WHERE status='running'", (ts,))
         defaults = {
             "site_name": BOOTSTRAP_SITE_NAME,
             "public_base_url": BOOTSTRAP_PUBLIC_BASE_URL,

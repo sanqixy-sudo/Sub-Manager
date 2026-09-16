@@ -12,6 +12,7 @@ from .config import CLIENT_TYPES
 from .db import db, get_setting
 from .schemas import SubscriptionIn
 from .security import masked_url, utcnow_iso
+from .services.coordination import group_mutation
 
 
 def parse_iso(value: str | None) -> datetime | None:
@@ -45,7 +46,7 @@ def validate_subscription(payload: SubscriptionIn) -> None:
 
 
 def _next_refresh(data: dict[str, Any]) -> str | None:
-    base = parse_iso(data.get("last_success_at") or data.get("last_refresh_at"))
+    base = parse_iso(data.get('last_refresh_at') or data.get('last_success_at'))
     if not base or not data.get("enabled"):
         return None
     return (base + timedelta(minutes=int(data["interval_minutes"]))).isoformat()
@@ -94,12 +95,34 @@ def load_subscription(sub_id: int, *, include_secrets: bool = True) -> dict[str,
 
 def list_subscriptions() -> list[dict[str, Any]]:
     with db() as conn:
-        ids = [int(x["id"]) for x in conn.execute("SELECT id FROM subscriptions ORDER BY id DESC")]
-    return [load_subscription(x, include_secrets=False) for x in ids]
+        groups = [dict(x) for x in conn.execute('SELECT * FROM subscriptions ORDER BY id DESC')]
+        by_id = {g['id']: g for g in groups}
+        for group in groups:
+            group.update(upstreams=[], outputs=[], manual_nodes=[], pending_node_count=0)
+            group['enabled'] = bool(group['enabled'])
+            group['next_refresh_at'] = _next_refresh(group)
+            group.pop('token', None)
+        for row in conn.execute('SELECT * FROM upstreams ORDER BY sort_order,id'):
+            item = dict(row)
+            item['url_masked'] = masked_url(item.pop('url'))
+            item['enabled'], item['used_cache'] = bool(item['enabled']), bool(item['used_cache'])
+            by_id[item['subscription_id']]['upstreams'].append(item)
+        for row in conn.execute('SELECT * FROM outputs ORDER BY id'):
+            item = dict(row); item['enabled'] = bool(item['enabled'])
+            by_id[item['subscription_id']]['outputs'].append(item)
+        for row in conn.execute('''SELECT m.id,m.subscription_id,m.name,m.protocol,m.node_key,m.enabled,m.sort_order,m.created_at,m.updated_at,n.final_name
+                                   FROM manual_nodes m LEFT JOIN node_snapshots n ON n.subscription_id=m.subscription_id AND n.node_key=m.node_key ORDER BY m.sort_order,m.id'''):
+            item = dict(row); item['enabled'] = bool(item['enabled'])
+            by_id[item['subscription_id']]['manual_nodes'].append(item)
+        for row in conn.execute('''SELECT p.subscription_id,COUNT(*) FROM node_preferences p JOIN node_snapshots n ON n.subscription_id=p.subscription_id AND n.node_key=p.node_key WHERE p.status!='confirmed' GROUP BY p.subscription_id'''):
+            by_id[row[0]]['pending_node_count'] = int(row[1])
+    return groups
 
 
 def create_subscription(payload: SubscriptionIn) -> dict[str, Any]:
     validate_subscription(payload)
+    from .services.manual_nodes import parse_manual_content, insert_manual_nodes
+    manual = parse_manual_content(payload.manual_content) if payload.manual_content else []
     ts = utcnow_iso()
     token = secrets.token_hex(20)  # Preserve V2 public URL shape and entropy.
     with db() as conn:
@@ -124,12 +147,16 @@ def create_subscription(payload: SubscriptionIn) -> dict[str, Any]:
                 "INSERT INTO outputs(subscription_id,client_type,name,slug,update_interval_minutes,enabled,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)",
                 (sub_id, output.client_type, output.name.strip(), output.slug, output.update_interval_minutes, int(output.enabled), ts, ts),
             )
+        insert_manual_nodes(conn, sub_id, manual, ts)
         conn.commit()
     return load_subscription(sub_id)
 
 
+@group_mutation
 def update_subscription(sub_id: int, payload: SubscriptionIn) -> tuple[dict[str, Any], list[str]]:
     validate_subscription(payload)
+    from .services.manual_nodes import parse_manual_content, insert_manual_nodes
+    manual = parse_manual_content(payload.manual_content) if payload.manual_content else []
     ts = utcnow_iso()
     with db() as conn:
         conn.execute("BEGIN IMMEDIATE")
@@ -165,6 +192,8 @@ def update_subscription(sub_id: int, payload: SubscriptionIn) -> tuple[dict[str,
         if keep_up_ids:
             marks = ",".join("?" for _ in keep_up_ids)
             conn.execute(f"DELETE FROM upstreams WHERE subscription_id=? AND id NOT IN ({marks})", (sub_id, *keep_up_ids))
+        else:
+            conn.execute("DELETE FROM upstreams WHERE subscription_id=?", (sub_id,))
         # Move current slugs out of the unique namespace first, so two outputs can
         # safely exchange slugs in one edit transaction.
         conn.execute("UPDATE outputs SET slug='__v3_edit_' || id WHERE subscription_id=?", (sub_id,))
@@ -183,6 +212,7 @@ def update_subscription(sub_id: int, payload: SubscriptionIn) -> tuple[dict[str,
         if keep_out_ids:
             marks = ",".join("?" for _ in keep_out_ids)
             conn.execute(f"DELETE FROM outputs WHERE subscription_id=? AND id NOT IN ({marks})", (sub_id, *keep_out_ids))
+        insert_manual_nodes(conn, sub_id, manual, ts)
         conn.commit()
     new_urls = {str(x.url) for x in payload.upstreams}
     return load_subscription(sub_id), list(old_urls - new_urls)
@@ -205,9 +235,9 @@ def update_upstream_result(upstream_id: int, result: dict[str, Any]) -> None:
 
 
 def is_due(data: dict[str, Any]) -> bool:
-    if data.get("cache_state") == "stale":
+    if data.get('cache_state') == 'stale' and data.get('last_refresh_status') not in {'stale', 'error'}:
         return True
-    base = parse_iso(data.get("last_success_at") or data.get("last_refresh_at"))
+    base = parse_iso(data.get('last_refresh_at') or data.get('last_success_at'))
     return not base or datetime.now(timezone.utc) >= base + timedelta(minutes=int(data["interval_minutes"]))
 
 

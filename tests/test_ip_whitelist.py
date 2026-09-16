@@ -71,8 +71,9 @@ def test_public_subscription_enforces_ip_whitelist(tmp_path, monkeypatch) -> Non
         client.post("/api/auth/login", json={"username": "admin", "password": "admin"})
         _, public_url = _create_whitelisted_group(client, "203.0.113.0/24")
 
-        # 白名单命中（X-Forwarded-For 第一个地址）→ 正常返回
-        allowed = client.get(public_url, headers={"X-Forwarded-For": "203.0.113.8, 10.0.0.1"})
+        # Only the ASGI client address counts; raw forwarding headers cannot grant access.
+        assert client.get(public_url, headers={'X-Forwarded-For': '203.0.113.8, 10.0.0.1'}).status_code == 404
+        allowed = TestClient(app, client=('203.0.113.8', 5000)).get(public_url)
         assert allowed.status_code == 200 and allowed.content == b"proxies: []\n"
 
         # 未命中与不带头（直连 IP 不是合法 IP）均返回与“订阅不存在”相同的 404
@@ -116,5 +117,5 @@ def test_ip_whitelist_schema_validation(tmp_path, monkeypatch) -> None:
         # 更新后白名单生效：旧 IP 被拒，新网段不再返回白名单 404
         denied = client.get(public_url, headers={"X-Forwarded-For": "203.0.113.8"})
         assert denied.status_code == 404 and denied.json()["detail"] == "订阅不存在"
-        allowed = client.get(public_url, headers={"X-Forwarded-For": "198.51.100.9"})
+        allowed = TestClient(app, client=('198.51.100.9', 5000)).get(public_url)
         assert allowed.status_code != 404

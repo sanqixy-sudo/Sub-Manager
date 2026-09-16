@@ -215,7 +215,7 @@ async function refreshAll() {
 
 async function rotate(g: Group) {
   try {
-    await ElMessageBox.confirm('旧订阅地址会立即失效；泄露场景下旧地址会改发不可用节点配置，对方一旦更新即自毁。确认重置公开 Token？', '重置 Token', { type: 'warning' })
+    await ElMessageBox.confirm('旧地址不再获取真实节点，可能收到不可用节点配置。只有客户端刷新并接受新配置才会生效；已下载的节点凭据不会被吊销。确认重置公开 Token？', '重置 Token', { type: 'warning', confirmButtonText: '重置 Token', cancelButtonText: '取消' })
   } catch {
     return // 用户取消，静默
   }

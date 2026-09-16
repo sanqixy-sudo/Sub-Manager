@@ -44,7 +44,7 @@ def overview() -> dict[str, object]:
         "pending_nodes": sum(int(group.get("pending_node_count", 0)) for group in groups),
         "stale_groups": sum(1 for group in groups if group.get("cache_state") == "stale"),
         "attention_groups": sorted(
-            [group for group in groups if group.get("last_refresh_status") in {"partial", "stale", "error"}
+            [group for group in groups if group.get("last_refresh_status") in {"partial", "stale", "error"} or group.get('cache_state') in {'empty', 'stale'}
              or int(group.get("pending_node_count", 0)) > 0],
             key=lambda group: (0 if group.get("last_refresh_status") in {"error", "stale", "partial"} else 1,
                                -int(group.get("pending_node_count", 0))),
