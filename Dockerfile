@@ -1,6 +1,6 @@
 FROM node:20-alpine AS web-build
 WORKDIR /src/frontend
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts frontend/index.html ./
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts frontend/index.html ./
 COPY frontend/src ./src
 COPY frontend/public ./public
 RUN npm install -g pnpm@9.15.5 && pnpm install --frozen-lockfile && pnpm run build
