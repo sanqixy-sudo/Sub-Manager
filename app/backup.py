@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import closing
 import shutil
 import sqlite3
+import tempfile
 from pathlib import Path
 
 
@@ -17,11 +19,19 @@ def backup_data(source: Path, destination: Path) -> None:
         raise ValueError('Data contains symlinks; review them before backup')
     shutil.copytree(source, destination, ignore=shutil.ignore_patterns('submanager.db', 'submanager.db-wal', 'submanager.db-shm'))
     if (source / 'submanager.db').exists():
-        with sqlite3.connect(f'file:{(source / "submanager.db").as_posix()}?mode=ro', uri=True) as current:
-            with sqlite3.connect(destination / 'submanager.db') as copied:
-                current.backup(copied)
-                if copied.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
-                    raise RuntimeError('Backup integrity check failed')
+        # The service is stopped. Copy DB/WAL to writable staging so SQLite can
+        # rebuild its shared-memory index without touching the read-only source.
+        with tempfile.TemporaryDirectory(prefix='.sqlite-snapshot-', dir=destination) as staging:
+            snapshot = Path(staging) / 'submanager.db'
+            shutil.copyfile(source / 'submanager.db', snapshot)
+            wal = source / 'submanager.db-wal'
+            if wal.exists():
+                shutil.copyfile(wal, Path(staging) / wal.name)
+            with closing(sqlite3.connect(snapshot)) as current:
+                with closing(sqlite3.connect(destination / 'submanager.db')) as copied:
+                    current.backup(copied)
+                    if copied.execute('PRAGMA integrity_check').fetchone()[0] != 'ok':
+                        raise RuntimeError('Backup integrity check failed')
 
 
 if __name__ == '__main__':
