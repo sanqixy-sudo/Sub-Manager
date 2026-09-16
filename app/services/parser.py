@@ -456,5 +456,7 @@ def render_internal_sources(nodes: list[NormalizedNode]) -> list[tuple[bytes, st
     if proxies:
         sources.append((yaml.safe_dump({"proxies": proxies}, allow_unicode=True, sort_keys=False).encode(), "yaml"))
     if uris:
-        sources.append((("\n".join(uris) + "\n").encode(), "txt"))
+        # Subconverter expects fetched URI subscriptions to be base64 encoded;
+        # a raw list is accepted as direct input but not as an HTTP source.
+        sources.append((base64.b64encode(("\n".join(uris) + "\n").encode()), "txt"))
     return sources

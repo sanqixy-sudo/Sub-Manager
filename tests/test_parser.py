@@ -43,3 +43,13 @@ def test_merge_deduplicates_and_internal_sources_do_not_contain_original_config(
     assert filtered == 3
     assert b"proxy-groups" not in sources[0][0]
     assert b"rules:" not in sources[0][0]
+
+
+def test_converter_uri_source_is_base64_and_preserves_nodes() -> None:
+    original = parse_subscription((FIXTURES / "raw_uris.txt").read_bytes(), "A", FILTER)
+    body = next(body for body, ext in render_internal_sources(original.nodes) if ext == "txt")
+    decoded = base64.b64decode(body, validate=True)
+    assert b"://" in decoded
+    reparsed = parse_subscription(body, "A", FILTER)
+    assert reparsed.source_format == "base64_uri"
+    assert [node.fingerprint for node in reparsed.nodes] == [node.fingerprint for node in original.nodes]

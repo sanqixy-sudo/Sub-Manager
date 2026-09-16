@@ -10,9 +10,13 @@ with httpx.Client(base_url='http://127.0.0.1:17779', timeout=180) as client:
     assert client.put('/api/settings', json=settings).status_code == 200
     clients = client.get('/api/client-types').json()
     user = base64.urlsafe_b64encode(b'aes-128-gcm:fixture-password').decode().rstrip('=')
+    password = base64.urlsafe_b64encode(b'fixture-password').decode().rstrip('=')
+    ssr = 'ssr://' + base64.urlsafe_b64encode(
+        f'ssr.example.invalid:443:origin:aes-128-cfb:plain:{password}/?remarks=Zml4dHVyZQ'.encode()
+    ).decode().rstrip('=')
     group = client.post('/api/subscriptions', json={
         'name': 'CI isolated renderer probe',
-        'manual_content': f'ss://{user}@node.example.invalid:443#fixture',
+        'manual_content': f'ss://{user}@node.example.invalid:443#fixture\n{ssr}',
         'outputs': [{'name': f'中文订阅 🚀 {kind}', 'slug': kind, 'client_type': kind} for kind in clients],
     })
     group.raise_for_status()
@@ -24,6 +28,8 @@ with httpx.Client(base_url='http://127.0.0.1:17779', timeout=180) as client:
     for output in urls:
         response = client.get(output['url'])
         assert response.status_code == 200 and response.content, output['client_type']
+        if output['client_type'] in {'ss', 'ssr'}:
+            assert output['client_type'] + '://' in base64.b64decode(response.content).decode()
         title = response.headers['profile-title']
         assert title.startswith('base64:')
         assert base64.b64decode(title[7:]).decode('utf-8') == f"中文订阅 🚀 {output['client_type']}"
