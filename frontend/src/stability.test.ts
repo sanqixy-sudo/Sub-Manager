@@ -45,6 +45,13 @@ describe('request lifecycle', () => {
     await expect(api('/api/subscriptions')).rejects.toThrow('登录已过期')
     expect(dispatchEvent.mock.calls[0][0].type).toBe('session-expired')
   })
+  it('keeps user portal expiration separate from the administrator session', async () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 401, json: async () => ({}) })))
+    await expect(api('/api/portal/me')).rejects.toThrow('登录已过期')
+    expect(dispatchEvent).not.toHaveBeenCalled()
+  })
   it('does not turn intentional cancellation into a network failure', async () => {
     vi.stubGlobal('fetch', vi.fn((_path, opts) => new Promise((_, reject) => opts.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError'))))))
     const controller = new AbortController()

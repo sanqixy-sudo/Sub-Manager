@@ -22,7 +22,7 @@ from .config import (
 from .security import hash_password, utcnow_iso
 
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 def connect() -> sqlite3.Connection:
@@ -254,6 +254,8 @@ def init_db() -> None:
             CREATE INDEX IF NOT EXISTS idx_health_runs_started ON health_check_runs(started_at DESC);
             """
         )
+        from .control.schema import migrate as migrate_control
+        migrate_control(conn)
         for name, ddl in {
             "last_attempt_at": "TEXT",
             "last_success_at": "TEXT",

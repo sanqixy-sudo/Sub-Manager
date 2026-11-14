@@ -32,3 +32,4 @@ references
 *.tar.gz
 *.patch
 requirements-dev.txt
+agent/bin

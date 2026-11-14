@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v3.4.4-2563eb?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-v3.5.0-2563eb?style=flat-square">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single--container-2496ed?style=flat-square&logo=docker&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white">
   <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&logo=vuedotjs&logoColor=white">
@@ -23,6 +23,8 @@
 Sub Manager 将多个远程订阅和手动节点汇总为稳定的公开订阅地址。系统对上游只拉取一次，完成解析、过滤、去重、改名和分类后，再生成各类客户端输出；刷新失败时保留 last-good，不让短暂故障直接影响下游。
 
 ## 主要功能
+
+- **托管代理服务（V3.5）**：服务器一键接入、AnyTLS / VLESS TLS / Trojan 节点、服务端链式出站、用户与多套餐、独立凭据、流量记账和用户中心。使用前阅读 [代理服务部署与限制](docs/PROXY_CONTROL.md)。
 
 - **统一节点来源**：支持 Clash/Mihomo YAML、3x-ui、Base64、URI 列表和单节点；可建立完全不含远程订阅的手动节点组。
 - **安全手动节点**：支持 VLESS、VMess、Trojan、SS、SSR、Hysteria2、TUIC、AnyTLS 等协议，连接信息使用 AES-256-GCM 加密保存。
@@ -70,7 +72,7 @@ docker compose up -d --build
 ### Docker CLI
 
 ```bash
-docker build -t sub-manager:v3.4.4 .
+docker build -t sub-manager:v3.5.0 .
 
 docker run -d \
   --name sub-manager \
@@ -78,7 +80,7 @@ docker run -d \
   -p 7777:7777 \
   -e TZ=Asia/Shanghai \
   -v /opt/sub-manager/data:/data \
-  sub-manager:v3.4.4
+  sub-manager:v3.5.0
 ```
 
 容器只暴露 `7777`，数据库、缓存、密钥和输出均位于 `/data`。重建或升级容器时必须保留该目录。
@@ -87,13 +89,14 @@ docker run -d \
 
 升级前先备份完整 `/data`，再构建新镜像并原位替换容器。数据库迁移会在启动时自动执行，并在 schema 升级前创建备份。旧版本不能直接写入已经升级的数据库，回滚时请同时恢复升级前的数据备份。
 
-本版请优先阅读 [V3.4.4 升级与回滚](docs/UPGRADE-3.4.4.md)，通用步骤见 [部署文档](docs/DEPLOYMENT.md) 和 [升级指南](UPDATE_GUIDE.md)。
+本版数据库升级到 V12，请先阅读 [V3.5 代理服务部署与回滚](docs/PROXY_CONTROL.md)。V3.4.4 历史说明见 [升级与回滚](docs/UPGRADE-3.4.4.md)，通用步骤见 [部署文档](docs/DEPLOYMENT.md)。
 
 ## 技术栈
 
 - 后端：FastAPI、Pydantic、HTTPX、SQLite
 - 前端：Vue 3、TypeScript、Vite、Pinia、Element Plus
 - 渲染与测活：subconverter、Mihomo v1.19.30
+- 托管代理：远程 Python Agent、sing-box v1.14.4（启用用户统计）
 - 进程管理：supervisord
 - 部署：单 Docker 容器，支持 amd64 / arm64
 

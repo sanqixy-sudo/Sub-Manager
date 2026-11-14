@@ -11,6 +11,7 @@ import {
   Wrench,
   MoreHorizontal,
   Activity,
+  Server,
 } from 'lucide-vue-next'
 import { useAppStore } from './stores/app'
 import LoginView from './views/LoginView.vue'
@@ -112,6 +113,7 @@ async function logout() {
         <small class="nav-label">运维</small>
         <router-link to="/"><LayoutDashboard />概览</router-link>
         <router-link to="/groups"><Layers3 />订阅组</router-link>
+        <router-link to="/proxy"><Server />代理服务</router-link>
         <router-link to="/health"><Activity />节点测活</router-link>
         <router-link to="/runs"><History />运行记录</router-link>
         <small class="nav-label management">管理</small>
@@ -157,6 +159,7 @@ async function logout() {
           <button><MoreHorizontal /><span>更多</span></button>
         </template>
         <div class="more-links">
+          <router-link to="/proxy"><Server />代理服务</router-link>
           <router-link to="/runs"><History />运行记录</router-link>
           <router-link to="/tools"><Wrench />检查工具</router-link>
           <router-link to="/settings"><Settings />系统设置</router-link>

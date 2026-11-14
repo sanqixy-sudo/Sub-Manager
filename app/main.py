@@ -23,6 +23,7 @@ from .services.fetcher import fetcher
 from .services.refresh import refresh_subscription, runtime_status, scheduler_loop, stop_refresh_tasks
 from .services.renderer import get_internal_source
 from .services.health import health_runtime, health_scheduler_loop, stop_health_task, verify_mihomo, seed_node_identities
+from .control import api as control_api
 
 
 @asynccontextmanager
@@ -52,6 +53,10 @@ app.include_router(subscriptions.router)
 app.include_router(operations.router)
 app.include_router(health_api.router)
 app.include_router(categories.router)
+app.include_router(control_api.admin)
+app.include_router(control_api.agent)
+app.include_router(control_api.portal)
+app.include_router(control_api.public)
 
 
 @app.exception_handler(RequestValidationError)

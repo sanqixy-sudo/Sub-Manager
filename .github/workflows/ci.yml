@@ -29,6 +29,29 @@ jobs:
       - run: python -m pytest -q
       - run: python scripts/check_release.py
 
+  proxy-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27.3"
+          cache: false
+      - run: pip install -r requirements-dev.txt
+      - run: python scripts/build_proxy_core.py --platforms linux/amd64
+      - name: Prepare pinned Mihomo for AnyTLS client interoperability
+        run: |
+          curl -fsSL https://github.com/MetaCubeX/mihomo/releases/download/v1.19.30/mihomo-linux-amd64-v1.19.30.gz -o /tmp/mihomo.gz
+          echo 'cf06ce2c7d1421bdbda14ee4a5b6046672dc35ebf8eecd8e77504ec3c0ed9a84  /tmp/mihomo.gz' | sha256sum -c -
+          gzip -dc /tmp/mihomo.gz > /tmp/mihomo
+          chmod 755 /tmp/mihomo
+      - name: Real AnyTLS, chained egress, per-user statistics and revocation
+        run: SING_BOX_BINARY="$PWD/agent/bin/sing-box-linux-amd64" MIHOMO_BINARY=/tmp/mihomo python -m pytest tests/test_proxy_runtime.py -q
+      - run: bash -n agent/install.sh
+
   frontend:
     runs-on: ubuntu-latest
     defaults:

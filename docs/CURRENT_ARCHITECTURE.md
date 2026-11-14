@@ -1,4 +1,16 @@
-# 当前 V2.6 原型架构
+# 当前架构：V3.5
+
+主控使用 FastAPI + SQLite V12，前端为 Vue 3 / TypeScript / Vite / Element Plus。supervisord 管理主控和 subconverter；Mihomo 按需承担测活。主控维持单容器、7777 和 /data。
+
+订阅链路：app/api → repository / services/fetcher → parser → renamer / categories → renderer → 原子 last-good。刷新按组 singleflight 合并；Mihomo 和 V2Ray 使用原生输出路径，其余兼容格式经内部临时源交给 subconverter。
+
+代理服务链路：app/control/api.py → service.py → schema.py / secrets.py。管理服务器、TLS 节点、链式出站、用户、多套餐实例及独立授权。Agent 通过单独认证的 /api/agent 接口拉取目标配置、回传实际配置版本和累计用量。agent/control_agent.py 在节点服务器上管理带用户统计的 sing-box，agent/stats.py 读取仅本机可达的 gRPC 计数器。
+
+用户门户 /#/portal 使用独立会话；个人 /p/{token}/{client_type} 输出原生 Mihomo 或 sing-box 配置。原有 /s/{token}/{slug} 公开订阅不变。安装、配额语义、升级与当前验证范围见 [代理服务说明](PROXY_CONTROL.md)。
+
+## 以下为 V2.6 原型历史存档
+
+以下结构和缺陷描述保留用于理解交接背景，不代表当前实现。
 
 ## 技术栈
 

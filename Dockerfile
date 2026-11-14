@@ -1,3 +1,9 @@
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS proxy-core-build
+RUN apk add --no-cache python3 ca-certificates git
+COPY scripts/build_proxy_core.py /build/scripts/build_proxy_core.py
+RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
+    python3 /build/scripts/build_proxy_core.py --output /out --platforms linux/amd64 linux/arm64
+
 FROM node:20-alpine AS web-build
 WORKDIR /src/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml frontend/tsconfig.json frontend/tsconfig.app.json frontend/vite.config.ts frontend/index.html ./
@@ -41,6 +47,8 @@ COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY app /app/app
+COPY agent /app/agent
+COPY --from=proxy-core-build /out /app/agent/bin
 COPY VERSION /app/VERSION
 COPY --from=web-build /src/app/static /app/app/static
 COPY replacements/ /base/

@@ -42,7 +42,7 @@ export async function api<T>(path: string, options: RequestInit = {}): Promise<T
         throw new ApiError('服务器返回了无效数据，请重试', response.status)
       }
       if (!response.ok) {
-        if (response.status === 401 && path !== '/api/auth/login') window.dispatchEvent(new Event('session-expired'))
+        if (response.status === 401 && path !== '/api/auth/login' && !path.startsWith('/api/portal/')) window.dispatchEvent(new Event('session-expired'))
         throw new ApiError(friendlyMessage(data?.detail, response.status), response.status)
       }
       if (data == null) throw new ApiError('服务器返回了空数据，请重试', response.status)

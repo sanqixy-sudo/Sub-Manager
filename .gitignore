@@ -34,6 +34,8 @@ app/static/
 .deploy-tools/
 .ui-verification/
 .test-*/
+.test-tools/
+agent/bin/
 .test-tmp*/
 preview-v3.2/
 references/
