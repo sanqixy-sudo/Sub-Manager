@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img alt="Version" src="https://img.shields.io/badge/version-v3.5.0-2563eb?style=flat-square">
+  <img alt="Version" src="https://img.shields.io/badge/version-v3.5.1-2563eb?style=flat-square">
   <img alt="Docker" src="https://img.shields.io/badge/Docker-single--container-2496ed?style=flat-square&logo=docker&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115-009688?style=flat-square&logo=fastapi&logoColor=white">
   <img alt="Vue" src="https://img.shields.io/badge/Vue-3-42b883?style=flat-square&logo=vuedotjs&logoColor=white">
@@ -69,10 +69,12 @@ docker compose up -d --build
 
 首次登录使用初始管理员账号 `admin` / `admin`，登录后请立即修改账号和密码。生产环境建议在前方配置 HTTPS 反向代理，并设置正确的公开访问域名。
 
+使用已完成验收的成品时，设置 `SUB_MANAGER_IMAGE=ghcr.io/sanqixy-sudo/sub-manager:v3.5.1`，执行 `docker compose pull sub-manager` 和 `docker compose up -d --no-build`。镜像包的访问权限在 GHCR 管理。
+
 ### Docker CLI
 
 ```bash
-docker build -t sub-manager:v3.5.0 .
+docker build -t sub-manager:v3.5.1 .
 
 docker run -d \
   --name sub-manager \
@@ -80,7 +82,7 @@ docker run -d \
   -p 7777:7777 \
   -e TZ=Asia/Shanghai \
   -v /opt/sub-manager/data:/data \
-  sub-manager:v3.5.0
+  sub-manager:v3.5.1
 ```
 
 容器只暴露 `7777`，数据库、缓存、密钥和输出均位于 `/data`。重建或升级容器时必须保留该目录。

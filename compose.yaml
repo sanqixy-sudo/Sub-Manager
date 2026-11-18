@@ -2,7 +2,7 @@ services:
   sub-manager:
     build:
       context: .
-    image: sub-manager:${SUB_MANAGER_VERSION:-3.5.0}
+    image: ${SUB_MANAGER_IMAGE:-sub-manager:${SUB_MANAGER_VERSION:-3.5.1}}
     container_name: sub-manager
     restart: unless-stopped
     ports:
